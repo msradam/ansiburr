@@ -754,7 +754,7 @@ def _build_loop_init(
         resolved = _resolve_items(state)
         return state.update(
             **{
-                items_state_key: list(resolved),
+                items_state_key: resolved.copy(),
                 item_state_key: resolved[0] if resolved else None,
                 idx_state_key: 0,
                 done_state_key: not resolved,
@@ -833,7 +833,7 @@ def _build_templated_include_vars_action(
     # Pre-build a "fill-in" dict so Burr's reducer-writes check is satisfied
     # even when the loaded file is missing keys declared in the union scan.
     # Missing keys land as None.
-    declared = list(declared_writes)
+    declared = declared_writes.copy()
 
     def _impl(state: State) -> State:
         context: dict[str, Any] = {}
@@ -901,9 +901,9 @@ def _build_first_found_include_vars_action(
     Mirrors the dominant ``geerlingguy.*`` pattern: per-OS vars files
     selected via ``ansible_facts.distribution`` / ``ansible_facts.os_family``.
     """
-    pinned_task_vars = dict(task_vars)
-    pinned_params = dict(params)
-    declared = list(declared_writes)
+    pinned_task_vars = task_vars.copy() if isinstance(task_vars, dict) else dict(task_vars)
+    pinned_params = params.copy() if isinstance(params, dict) else dict(params)
+    declared = declared_writes.copy()
 
     def _impl(state: State) -> State:
         # Build the Jinja context: play vars + non-internal state + task vars.
@@ -912,7 +912,7 @@ def _build_first_found_include_vars_action(
             if key.startswith("_"):
                 continue
             context.setdefault(key, value)
-        rendered = _render_jinja(dict(pinned_params), context)
+        rendered = _render_jinja(pinned_params.copy(), context)
         files = rendered.get("files", [])
         paths = rendered.get("paths") or ["."]
         if not isinstance(files, list) or not isinstance(paths, list):
@@ -999,8 +999,8 @@ def _build_include_vars_action(
 
     else:
         with resolved_path.open() as f:
-            initial_keys = list((yaml.safe_load(f) or {}).keys())
-        writes = list(initial_keys)
+            loaded_keys = (yaml.safe_load(f) or {}).keys()
+        writes = [str(k) for k in loaded_keys]
 
         def _impl(state: State) -> State:
             with resolved_path.open() as f:
@@ -1147,6 +1147,8 @@ def _build_changed_when_post(
     def _impl(state: State) -> State:
         state_dict = state.get_all()
         try:
+            # eval needs a dict for the locals namespace; state.get_all may
+            # return a Mapping subclass, so wrap defensively.
             value = bool(eval(translated, {"__builtins__": {}}, dict(state_dict)))
         except Exception:
             # If the expression can't evaluate (e.g. references a register
@@ -1298,6 +1300,281 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
         register_targets.append(register)
         task_meta.append(meta)
 
+    def _allocate_block_subgraph_names(
+        leaves: list[dict[str, Any]], slug_prefix: str
+    ) -> list[str]:
+        """Allocate unique py_names for a list of block / rescue / always
+        leaves, slugifying each from its ``name:`` (or a generated fallback
+        for unnamed tasks)."""
+        out: list[str] = []
+        for idx, t in enumerate(leaves):
+            raw = t.get("name") or f"{slug_prefix}_{idx + 1}"
+            out.append(_unique(_slugify(raw)))
+        return out
+
+    def _emit_block_rescue_always(task: dict[str, Any]) -> None:
+        """Lower the full block + rescue + always trilogy.
+
+        Routing:
+          - block tasks failure -> rescue_first (failure routes into rescue)
+          - block_last success  -> save_failure (skips rescue + clear)
+          - rescue tasks failure -> save_failure (latch for restore)
+          - rescue_last success -> clear_action (default next-seq)
+          - clear_action -> save_failure (no-op when not failed)
+          - save_failure -> always_first
+          - always_last -> restore_failure (re-applies latched failure)
+        """
+        block_leaves = _flatten_tasks(task["block"], base_dir=base_dir)
+        rescue_leaves = _flatten_tasks(task["rescue"], base_dir=base_dir)
+        always_leaves = _flatten_tasks(task["always"], base_dir=base_dir)
+        if not block_leaves:
+            raise ValueError("block: must contain at least one task")
+        if not rescue_leaves:
+            raise ValueError("rescue: must contain at least one task")
+        if not always_leaves:
+            raise ValueError("always: must contain at least one task")
+        if any("block" in leaf for leaf in block_leaves + rescue_leaves + always_leaves):
+            raise UnsupportedPlaybookConstruct(
+                "nested block within block+rescue+always is not yet supported"
+            )
+
+        block_py = _allocate_block_subgraph_names(block_leaves, "block_task")
+        rescue_py = _allocate_block_subgraph_names(rescue_leaves, "rescue_task")
+        always_py = _allocate_block_subgraph_names(always_leaves, "always_task")
+        clear_py = _unique("_block_clear_failure")
+        save_py = _unique("_block_save_failure")
+        restore_py = _unique("_block_restore_failure")
+        flag_key = f"_block_failure_remembered_{len(block_ctxs)}"
+        rescue_first = rescue_py[0]
+
+        for b_idx, (py, btask) in enumerate(zip(block_py, block_leaves, strict=True)):
+            is_last_block = b_idx == len(block_py) - 1
+            block_ctxs[py] = (rescue_first, save_py, is_last_block)
+            _record_block_inner_task(py, btask)
+        for py, rtask in zip(rescue_py, rescue_leaves, strict=True):
+            rescue_failure_overrides[py] = save_py
+            _record_block_inner_task(py, rtask)
+        _record(
+            py_name=clear_py,
+            when_clause=None,
+            failed_when_clause=None,
+            ignore_errors=True,
+            register=None,
+            meta=("clear_failure",),
+        )
+        _record(
+            py_name=save_py,
+            when_clause=None,
+            failed_when_clause=None,
+            ignore_errors=True,
+            register=None,
+            meta=("block_save_failure", flag_key),
+        )
+        for py, atask in zip(always_py, always_leaves, strict=True):
+            _record_block_inner_task(py, atask)
+        _record(
+            py_name=restore_py,
+            when_clause=None,
+            failed_when_clause=None,
+            ignore_errors=False,
+            register=None,
+            meta=("block_restore_failure", flag_key),
+        )
+
+    def _emit_block_rescue(task: dict[str, Any]) -> None:
+        """Lower block + rescue (no always). Block failure routes into the
+        rescue chain; rescue_last falls through to a clear-failure action
+        that wipes the sentinels before downstream tasks run."""
+        block_leaves = _flatten_tasks(task["block"], base_dir=base_dir)
+        rescue_leaves = _flatten_tasks(task["rescue"], base_dir=base_dir)
+        if not block_leaves:
+            raise ValueError("block: must contain at least one task")
+        if not rescue_leaves:
+            raise ValueError("rescue: must contain at least one task")
+        if any("block" in leaf for leaf in block_leaves + rescue_leaves):
+            raise UnsupportedPlaybookConstruct(
+                "nested block + rescue is not yet supported"
+            )
+
+        block_py = _allocate_block_subgraph_names(block_leaves, "block_task")
+        rescue_py = _allocate_block_subgraph_names(rescue_leaves, "rescue_task")
+        clear_py = _unique("_block_clear_failure")
+        rescue_first = rescue_py[0]
+
+        for b_idx, (py, btask) in enumerate(zip(block_py, block_leaves, strict=True)):
+            is_last_block = b_idx == len(block_py) - 1
+            block_ctxs[py] = (rescue_first, clear_py, is_last_block)
+            _record_block_inner_task(py, btask)
+        for py, rtask in zip(rescue_py, rescue_leaves, strict=True):
+            _record_block_inner_task(py, rtask)
+        _record(
+            py_name=clear_py,
+            when_clause=None,
+            failed_when_clause=None,
+            ignore_errors=True,
+            register=None,
+            meta=("clear_failure",),
+        )
+
+    def _emit_block_always(task: dict[str, Any]) -> None:
+        """Lower block + always (no rescue). Block failure latches into the
+        save action and propagates through the always chain; restore
+        re-applies the latched failure so escalate fires after always."""
+        block_leaves = _flatten_tasks(task["block"], base_dir=base_dir)
+        always_leaves = _flatten_tasks(task["always"], base_dir=base_dir)
+        if not block_leaves:
+            raise ValueError("block: must contain at least one task")
+        if not always_leaves:
+            raise ValueError("always: must contain at least one task")
+        if any("block" in leaf for leaf in block_leaves + always_leaves):
+            raise UnsupportedPlaybookConstruct(
+                "nested block within block+always is not yet supported"
+            )
+
+        block_py = _allocate_block_subgraph_names(block_leaves, "block_task")
+        always_py = _allocate_block_subgraph_names(always_leaves, "always_task")
+        save_py = _unique("_block_save_failure")
+        restore_py = _unique("_block_restore_failure")
+        flag_key = f"_block_failure_remembered_{len(block_ctxs)}"
+
+        for b_idx, (py, btask) in enumerate(zip(block_py, block_leaves, strict=True)):
+            is_last_block = b_idx == len(block_py) - 1
+            block_ctxs[py] = (save_py, save_py, is_last_block)
+            _record_block_inner_task(py, btask)
+        _record(
+            py_name=save_py,
+            when_clause=None,
+            failed_when_clause=None,
+            ignore_errors=True,
+            register=None,
+            meta=("block_save_failure", flag_key),
+        )
+        for py, atask in zip(always_py, always_leaves, strict=True):
+            _record_block_inner_task(py, atask)
+        # restore_failure keeps the standard escalate edge; ignore_errors=False
+        # so the failure transition fires when the latched flag is restored.
+        _record(
+            py_name=restore_py,
+            when_clause=None,
+            failed_when_clause=None,
+            ignore_errors=False,
+            register=None,
+            meta=("block_restore_failure", flag_key),
+        )
+
+    def _emit_loop_task(task: dict[str, Any], raw_name: str) -> None:
+        """Lower a ``loop:`` / ``with_items:`` / ``with_subelements:`` task
+        into the three-action sub-FSM (loop_init -> body -> loop_advance)
+        with a back-edge. The body action carries the per-iteration item
+        key so its Jinja context exposes ``{{ item }}``. A trailing
+        notify-marker is emitted when the task has ``notify:`` set.
+        """
+        base_py = _slugify(raw_name)
+        init_py = _unique(f"{base_py}_loop_init")
+        task_py = _unique(base_py)
+        advance_py = _unique(f"{base_py}_loop_advance")
+        items_key = f"_loop_{task_py}_items"
+        item_key = f"_loop_{task_py}_item"
+        idx_key = f"_loop_{task_py}_idx"
+        done_key = f"_loop_{task_py}_done"
+        items: list[Any] | str | tuple[str, str, str]
+        if "with_subelements" in task:
+            wse = task["with_subelements"]
+            if not isinstance(wse, list) or len(wse) < 2:
+                raise ValueError(
+                    "with_subelements: must be a list of at least 2 items "
+                    "(parent template, subkey)"
+                )
+            items = ("subelements", str(wse[0]), str(wse[1]))
+        else:
+            items = _loop_items_from_task(task)
+        module, args = _module_from_task(task)
+        register = task.get("register")
+        become = bool(task.get("become", play_become))
+        when = task.get("when")
+        fw = task.get("failed_when")
+
+        _record(
+            py_name=init_py,
+            when_clause=_when_to_expr_string(when) if when is not None else None,
+            failed_when_clause=None,
+            ignore_errors=True,
+            register=None,
+            meta=("loop_init", items_key, item_key, idx_key, done_key, items),
+        )
+        _record(
+            py_name=task_py,
+            when_clause=None,
+            failed_when_clause=_when_to_expr_string(fw) if fw is not None else None,
+            ignore_errors=bool(task.get("ignore_errors", False)),
+            register=register,
+            meta=("module", module, args, register, become, item_key),
+        )
+        _record(
+            py_name=advance_py,
+            when_clause=None,
+            failed_when_clause=None,
+            ignore_errors=True,
+            register=None,
+            meta=("loop_advance", items_key, item_key, idx_key, done_key),
+        )
+        loop_back_edges[advance_py] = (init_py, task_py, done_key)
+
+        notify_list = _coerce_notify_to_list(task.get("notify"))
+        if notify_list:
+            seen: dict[str, None] = {}
+            for handler in notify_list:
+                slug = handler_name_to_slug[handler]
+                seen.setdefault(slug, None)
+            marker_handlers = list(seen)
+            notified_handlers_seen.update(marker_handlers)
+            marker_name = _unique(f"_notify_{task_py}")
+            _record(
+                py_name=marker_name,
+                when_clause=None,
+                failed_when_clause=None,
+                ignore_errors=True,
+                register=None,
+                meta=("notify_marker", marker_handlers),
+            )
+
+    def _record_block_inner_task(py: str, t: dict[str, Any]) -> None:
+        """Record one inner task of a block / rescue / always group.
+
+        Handles module tasks and ``set_fact:`` (the common cases inside a
+        block). ``notify:`` / ``loop:`` / ``changed_when:`` inside a block,
+        rescue, or always chain still raise; those work fine OUTSIDE a
+        block but combining them with the block lowerings is deferred.
+        """
+        if any(k in t for k in ("loop", "with_items", "notify", "changed_when")):
+            raise UnsupportedPlaybookConstruct(
+                "loop:/with_items:/notify:/changed_when: inside block:/rescue:/always: "
+                f"are not yet supported; task: {t.get('name', '<unnamed>')!r}"
+            )
+        module, args = _module_from_task(t)
+        register = t.get("register")
+        become = bool(t.get("become", play_become))
+        when = t.get("when")
+        fw = t.get("failed_when")
+        if module in _SET_FACT_MODULES:
+            _record(
+                py_name=py,
+                when_clause=_when_to_expr_string(when) if when is not None else None,
+                failed_when_clause=None,
+                ignore_errors=True,
+                register=None,
+                meta=("set_fact", args),
+            )
+            return
+        _record(
+            py_name=py,
+            when_clause=_when_to_expr_string(when) if when is not None else None,
+            failed_when_clause=_when_to_expr_string(fw) if fw is not None else None,
+            ignore_errors=bool(t.get("ignore_errors", False)),
+            register=register,
+            meta=("module", module, args, register, become),
+        )
+
     notified_handlers_seen: set[str] = set()
     # Index tracking for emitting loop back-edges during the transition pass.
     # Maps the loop-task's py_name -> (init_py_name, advance_py_name, done_state_key).
@@ -1317,291 +1594,15 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
         # Pure block (no rescue, no always) is already inlined by
         # ``_flatten_tasks`` and never reaches this branch.
         if "block" in task and "rescue" in task and "always" in task:
-            block_inner = task["block"]
-            rescue_inner = task["rescue"]
-            always_inner = task["always"]
-            block_leaves = _flatten_tasks(block_inner, base_dir=base_dir)
-            rescue_leaves = _flatten_tasks(rescue_inner, base_dir=base_dir)
-            always_leaves = _flatten_tasks(always_inner, base_dir=base_dir)
-            if not block_leaves:
-                raise ValueError("block: must contain at least one task")
-            if not rescue_leaves:
-                raise ValueError("rescue: must contain at least one task")
-            if not always_leaves:
-                raise ValueError("always: must contain at least one task")
-            if any(
-                "block" in leaf
-                for leaf in block_leaves + rescue_leaves + always_leaves
-            ):
-                raise UnsupportedPlaybookConstruct(
-                    "nested block within block+rescue+always is not yet supported"
-                )
-
-            block_py_names_3 = []
-            for b_idx, btask in enumerate(block_leaves):
-                b_raw = btask.get("name") or f"block_task_{b_idx + 1}"
-                block_py_names_3.append(_unique(_slugify(b_raw)))
-            rescue_py_names_3 = []
-            for r_idx, rtask in enumerate(rescue_leaves):
-                r_raw = rtask.get("name") or f"rescue_task_{r_idx + 1}"
-                rescue_py_names_3.append(_unique(_slugify(r_raw)))
-            always_py_names_3 = []
-            for a_idx, atask in enumerate(always_leaves):
-                a_raw = atask.get("name") or f"always_task_{a_idx + 1}"
-                always_py_names_3.append(_unique(_slugify(a_raw)))
-            clear_py_name_3 = _unique("_block_clear_failure")
-            save_py_name_3 = _unique("_block_save_failure")
-            restore_py_name_3 = _unique("_block_restore_failure")
-            flag_key_3 = f"_block_failure_remembered_{len(block_ctxs)}"
-            rescue_first_3 = rescue_py_names_3[0]
-
-            def _record_inner_triple(py: str, t: dict[str, Any]) -> None:
-                if any(k in t for k in ("loop", "with_items", "notify", "changed_when")):
-                    raise UnsupportedPlaybookConstruct(
-                        "loop:/with_items:/notify:/changed_when: inside block: "
-                        "or rescue: or always: are not yet supported; "
-                        f"task: {t.get('name', '<unnamed>')!r}"
-                    )
-                module, args = _module_from_task(t)
-                register = t.get("register")
-                become = bool(t.get("become", play_become))
-                when = t.get("when")
-                fw = t.get("failed_when")
-                if module in _SET_FACT_MODULES:
-                    _record(
-                        py_name=py,
-                        when_clause=_when_to_expr_string(when) if when is not None else None,
-                        failed_when_clause=None,
-                        ignore_errors=True,
-                        register=None,
-                        meta=("set_fact", args),
-                    )
-                    return
-                _record(
-                    py_name=py,
-                    when_clause=_when_to_expr_string(when) if when is not None else None,
-                    failed_when_clause=_when_to_expr_string(fw) if fw is not None else None,
-                    ignore_errors=bool(t.get("ignore_errors", False)),
-                    register=register,
-                    meta=("module", module, args, register, become),
-                )
-
-            # Block tasks: failure -> rescue_first. block_last success ->
-            # save_failure (skipping rescue + clear because the block didn't
-            # fail). The standard chain block_last -> rescue_first via next-seq
-            # would only fire on the failure path, so the success override
-            # is needed.
-            for b_idx, (py, btask) in enumerate(
-                zip(block_py_names_3, block_leaves, strict=True)
-            ):
-                is_last_block = b_idx == len(block_py_names_3) - 1
-                block_ctxs[py] = (rescue_first_3, save_py_name_3, is_last_block)
-                _record_inner_triple(py, btask)
-            for py, rtask in zip(rescue_py_names_3, rescue_leaves, strict=True):
-                # rescue tasks: failure -> save_failure (so the rescue
-                # failure is latched and propagates through always).
-                # success -> next-seq, which lands on the next rescue
-                # task or, for rescue_last, on clear_action (the default
-                # next-seq is already correct).
-                rescue_failure_overrides[py] = save_py_name_3
-                _record_inner_triple(py, rtask)
-            _record(
-                py_name=clear_py_name_3,
-                when_clause=None,
-                failed_when_clause=None,
-                ignore_errors=True,
-                register=None,
-                meta=("clear_failure",),
-            )
-            _record(
-                py_name=save_py_name_3,
-                when_clause=None,
-                failed_when_clause=None,
-                ignore_errors=True,
-                register=None,
-                meta=("block_save_failure", flag_key_3),
-            )
-            for py, atask in zip(always_py_names_3, always_leaves, strict=True):
-                _record_inner_triple(py, atask)
-            _record(
-                py_name=restore_py_name_3,
-                when_clause=None,
-                failed_when_clause=None,
-                ignore_errors=False,
-                register=None,
-                meta=("block_restore_failure", flag_key_3),
-            )
+            _emit_block_rescue_always(task)
             continue
 
         if "block" in task and "always" in task:
-            block_inner = task["block"]
-            always_inner = task["always"]
-            block_leaves = _flatten_tasks(block_inner, base_dir=base_dir)
-            always_leaves = _flatten_tasks(always_inner, base_dir=base_dir)
-            if not block_leaves:
-                raise ValueError("block: must contain at least one task")
-            if not always_leaves:
-                raise ValueError("always: must contain at least one task")
-            if any("block" in leaf for leaf in block_leaves + always_leaves):
-                raise UnsupportedPlaybookConstruct(
-                    "nested block within block+always is not yet supported"
-                )
-
-            block_py_names = []
-            for b_idx, btask in enumerate(block_leaves):
-                b_raw = btask.get("name") or f"block_task_{b_idx + 1}"
-                block_py_names.append(_unique(_slugify(b_raw)))
-            always_py_names: list[str] = []
-            for a_idx, atask in enumerate(always_leaves):
-                a_raw = atask.get("name") or f"always_task_{a_idx + 1}"
-                always_py_names.append(_unique(_slugify(a_raw)))
-            save_py_name = _unique("_block_save_failure")
-            restore_py_name = _unique("_block_restore_failure")
-            flag_key = f"_block_failure_remembered_{len(block_ctxs)}"
-
-            def _record_inner_always(py: str, t: dict[str, Any]) -> None:
-                if any(k in t for k in ("loop", "with_items", "notify", "changed_when")):
-                    raise UnsupportedPlaybookConstruct(
-                        "loop:/with_items:/notify:/changed_when: inside block: "
-                        "or always: are not yet supported; "
-                        f"task: {t.get('name', '<unnamed>')!r}"
-                    )
-                module, args = _module_from_task(t)
-                register = t.get("register")
-                become = bool(t.get("become", play_become))
-                when = t.get("when")
-                fw = t.get("failed_when")
-                if module in _SET_FACT_MODULES:
-                    _record(
-                        py_name=py,
-                        when_clause=_when_to_expr_string(when) if when is not None else None,
-                        failed_when_clause=None,
-                        ignore_errors=True,
-                        register=None,
-                        meta=("set_fact", args),
-                    )
-                    return
-                _record(
-                    py_name=py,
-                    when_clause=_when_to_expr_string(when) if when is not None else None,
-                    failed_when_clause=_when_to_expr_string(fw) if fw is not None else None,
-                    ignore_errors=bool(t.get("ignore_errors", False)),
-                    register=register,
-                    meta=("module", module, args, register, become),
-                )
-
-            # Block tasks route failure to the save_failure action (which
-            # latches the failure into the flag), then onward to the always
-            # chain. block_last's default success-edge is overridden to the
-            # save action so the path always passes through it; save is a
-            # no-op when _last_failed is False.
-            for b_idx, (py, btask) in enumerate(
-                zip(block_py_names, block_leaves, strict=True)
-            ):
-                is_last_block = b_idx == len(block_py_names) - 1
-                block_ctxs[py] = (save_py_name, save_py_name, is_last_block)
-                _record_inner_always(py, btask)
-            _record(
-                py_name=save_py_name,
-                when_clause=None,
-                failed_when_clause=None,
-                ignore_errors=True,
-                register=None,
-                meta=("block_save_failure", flag_key),
-            )
-            for py, atask in zip(always_py_names, always_leaves, strict=True):
-                _record_inner_always(py, atask)
-            # restore_failure needs the standard escalate edge: after it
-            # re-applies ``_last_failed`` from the latched flag, the very next
-            # transition out of restore_failure should route to escalate. So
-            # ignore_errors stays False so the failure transition is emitted.
-            _record(
-                py_name=restore_py_name,
-                when_clause=None,
-                failed_when_clause=None,
-                ignore_errors=False,
-                register=None,
-                meta=("block_restore_failure", flag_key),
-            )
+            _emit_block_always(task)
             continue
 
         if "block" in task:
-            block_inner = task["block"]
-            rescue_inner = task["rescue"]
-            block_leaves = _flatten_tasks(block_inner, base_dir=base_dir)
-            rescue_leaves = _flatten_tasks(rescue_inner, base_dir=base_dir)
-            if not block_leaves:
-                raise ValueError("block: must contain at least one task")
-            if not rescue_leaves:
-                raise ValueError("rescue: must contain at least one task")
-            if any("block" in leaf for leaf in block_leaves + rescue_leaves):
-                raise UnsupportedPlaybookConstruct(
-                    "nested block + rescue is not yet supported; "
-                    "v0.0.10 only handles a single non-nested block + rescue"
-                )
-
-            # Pre-allocate py_names for everything so block tasks can carry
-            # the rescue_first reference forward.
-            block_py_names = []
-            for b_idx, btask in enumerate(block_leaves):
-                b_raw = btask.get("name") or f"block_task_{b_idx + 1}"
-                block_py_names.append(_unique(_slugify(b_raw)))
-            rescue_py_names: list[str] = []
-            for r_idx, rtask in enumerate(rescue_leaves):
-                r_raw = rtask.get("name") or f"rescue_task_{r_idx + 1}"
-                rescue_py_names.append(_unique(_slugify(r_raw)))
-            clear_py_name = _unique("_block_clear_failure")
-            rescue_first = rescue_py_names[0]
-
-            def _record_inner(py: str, t: dict[str, Any]) -> None:
-                """Record a single block/rescue inner task. v0.0.10 supports
-                module tasks and ``set_fact:``. ``notify:``, ``loop:``, and
-                ``changed_when:`` inside a block/rescue are not yet lowered
-                (those features still work outside block/rescue)."""
-                if any(k in t for k in ("loop", "with_items", "notify", "changed_when")):
-                    raise UnsupportedPlaybookConstruct(
-                        "loop:/with_items:/notify:/changed_when: inside block: "
-                        "or rescue: are not yet supported (planned for v0.0.11); "
-                        f"task: {t.get('name', '<unnamed>')!r}"
-                    )
-                module, args = _module_from_task(t)
-                register = t.get("register")
-                become = bool(t.get("become", play_become))
-                when = t.get("when")
-                fw = t.get("failed_when")
-                if module in _SET_FACT_MODULES:
-                    _record(
-                        py_name=py,
-                        when_clause=_when_to_expr_string(when) if when is not None else None,
-                        failed_when_clause=None,
-                        ignore_errors=True,
-                        register=None,
-                        meta=("set_fact", args),
-                    )
-                    return
-                _record(
-                    py_name=py,
-                    when_clause=_when_to_expr_string(when) if when is not None else None,
-                    failed_when_clause=_when_to_expr_string(fw) if fw is not None else None,
-                    ignore_errors=bool(t.get("ignore_errors", False)),
-                    register=register,
-                    meta=("module", module, args, register, become),
-                )
-
-            for b_idx, (py, btask) in enumerate(zip(block_py_names, block_leaves, strict=True)):
-                is_last_block = b_idx == len(block_py_names) - 1
-                block_ctxs[py] = (rescue_first, clear_py_name, is_last_block)
-                _record_inner(py, btask)
-            for py, rtask in zip(rescue_py_names, rescue_leaves, strict=True):
-                _record_inner(py, rtask)
-            _record(
-                py_name=clear_py_name,
-                when_clause=None,
-                failed_when_clause=None,
-                ignore_errors=True,
-                register=None,
-                meta=("clear_failure",),
-            )
+            _emit_block_rescue(task)
             continue
 
         # ``loop:`` / ``with_items:`` lower to a three-action sub-FSM:
@@ -1609,86 +1610,8 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
         # until the items are exhausted. The task action reads the current
         # item from a dedicated state key and exposes it as ``{{ item }}``
         # in the rendered Jinja context, matching Ansible's variable naming.
-        if (
-            "loop" in task
-            or "with_items" in task
-            or "with_subelements" in task
-        ):
-            base_py = _slugify(raw_name)
-            init_py = _unique(f"{base_py}_loop_init")
-            task_py = _unique(base_py)
-            advance_py = _unique(f"{base_py}_loop_advance")
-            items_key = f"_loop_{task_py}_items"
-            item_key = f"_loop_{task_py}_item"
-            idx_key = f"_loop_{task_py}_idx"
-            done_key = f"_loop_{task_py}_done"
-            if "with_subelements" in task:
-                # ``with_subelements: [parent_list_template, subkey]`` flattens
-                # parent-list * subkey into 2-element [parent, sub] items.
-                wse = task["with_subelements"]
-                if not isinstance(wse, list) or len(wse) < 2:
-                    raise ValueError(
-                        "with_subelements: must be a list of at least 2 items "
-                        "(parent template, subkey)"
-                    )
-                parent_template = str(wse[0])
-                subkey = str(wse[1])
-                items: list[Any] | str | tuple[str, str, str] = (
-                    "subelements",
-                    parent_template,
-                    subkey,
-                )
-            else:
-                items = _loop_items_from_task(task)
-            module, args = _module_from_task(task)
-            register = task.get("register")
-            become = bool(task.get("become", play_become))
-            when = task.get("when")
-            fw = task.get("failed_when")
-
-            _record(
-                py_name=init_py,
-                when_clause=_when_to_expr_string(when) if when is not None else None,
-                failed_when_clause=None,
-                ignore_errors=True,
-                register=None,
-                meta=("loop_init", items_key, item_key, idx_key, done_key, items),
-            )
-            _record(
-                py_name=task_py,
-                when_clause=None,
-                failed_when_clause=_when_to_expr_string(fw) if fw is not None else None,
-                ignore_errors=bool(task.get("ignore_errors", False)),
-                register=register,
-                meta=("module", module, args, register, become, item_key),
-            )
-            _record(
-                py_name=advance_py,
-                when_clause=None,
-                failed_when_clause=None,
-                ignore_errors=True,
-                register=None,
-                meta=("loop_advance", items_key, item_key, idx_key, done_key),
-            )
-            loop_back_edges[advance_py] = (init_py, task_py, done_key)
-
-            notify_list = _coerce_notify_to_list(task.get("notify"))
-            if notify_list:
-                seen: dict[str, None] = {}
-                for handler in notify_list:
-                    slug = handler_name_to_slug[handler]
-                    seen.setdefault(slug, None)
-                marker_handlers = list(seen)
-                notified_handlers_seen.update(marker_handlers)
-                marker_name = _unique(f"_notify_{task_py}")
-                _record(
-                    py_name=marker_name,
-                    when_clause=None,
-                    failed_when_clause=None,
-                    ignore_errors=True,
-                    register=None,
-                    meta=("notify_marker", marker_handlers),
-                )
+        if "loop" in task or "with_items" in task or "with_subelements" in task:
+            _emit_loop_task(task, raw_name)
             continue
 
         py = _unique(_slugify(raw_name))
@@ -2149,8 +2072,12 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
     # ------------------------------------------------------------------
     transitions: list[tuple] = []
     if gather_facts:
-        transitions.append(("gather_facts", "escalate", expr("_last_failed")))
-        transitions.append(("gather_facts", py_names[0]))
+        transitions.extend(
+            [
+                ("gather_facts", "escalate", expr("_last_failed")),
+                ("gather_facts", py_names[0]),
+            ]
+        )
 
     for i, current in enumerate(py_names):
         nxt = py_names[i + 1] if i + 1 < len(py_names) else "done"
@@ -2229,11 +2156,7 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
     for transition_tuple in transitions:
         builder = builder.with_transitions(transition_tuple)
 
-    state_init: dict[str, Any] = {
-        **initial_sentinels(),
-        **play_vars,
-        "outcome": "",
-    }
+    state_init: dict[str, Any] = initial_sentinels() | play_vars | {"outcome": ""}
     # Pre-seed register targets so transitions can read them before the producing
     # task runs.
     for reg in register_targets:

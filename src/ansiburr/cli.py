@@ -134,8 +134,7 @@ def _format_condition(condition: Any) -> str:
         return ""
     # Burr's expr-built conditions expose ``.expr`` in their string form;
     # the default repr is something like "Condition(expr='x == 1')".
-    text = str(condition)
-    return text.strip()
+    return str(condition).strip()
 
 
 def _graph_text(app: Application) -> str:

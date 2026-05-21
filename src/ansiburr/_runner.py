@@ -210,7 +210,7 @@ def run_module(
         # an acceptable degradation.
         cancelled = {"flag": False}
 
-        def _on_sigint(signum: int, frame: Any) -> None:
+        def _on_sigint(_signum: int, _frame: Any) -> None:
             cancelled["flag"] = True
 
         previous_handler: Any = None

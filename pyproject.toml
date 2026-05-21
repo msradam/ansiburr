@@ -1,6 +1,6 @@
 [project]
 name = "ansiburr"
-version = "0.0.24"
+version = "0.0.25"
 description = "Run Ansible modules as Burr state-machine actions in Python."
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
@@ -58,6 +58,9 @@ dev = [
     "types-pyyaml>=6",
     "docker>=7.1.0",
     "twine>=6.2.0",
+    "vulture>=2.16",
+    "radon>=6.0.1",
+    "refurb>=2.3.1",
 ]
 
 [tool.ruff]

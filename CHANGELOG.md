@@ -6,6 +6,38 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.25] - 2026-05-21
+
+Refactor / hygiene release. No behavior change; all 61 tests pass and all
+six geerlingguy roles still convert with identical action counts.
+
+### Changed
+
+- ``from_playbook`` refactored: the four big dispatch branches (block +
+  rescue + always, block + always, block + rescue, loop) extracted as
+  inner functions named ``_emit_block_rescue_always``,
+  ``_emit_block_always``, ``_emit_block_rescue``, and ``_emit_loop_task``.
+  Plus ``_allocate_block_subgraph_names`` for the repeated py-name
+  allocation pattern across block variants.
+- Cyclomatic complexity of ``from_playbook`` dropped from 160 to 119
+  (still F-grade, but a 25% reduction). ``_convert.py``'s maintainability
+  index rose from 2.41 to 8.56 (3.5x improvement; still C-grade).
+- Consolidated three near-identical ``_record_inner*`` helpers (one per
+  block variant) into a single ``_record_block_inner_task`` defined at
+  ``from_playbook`` scope.
+
+### Tooling
+
+- Added ``vulture``, ``radon``, and ``refurb`` to the dev dependency
+  group so the same hygiene checks run locally as in CI.
+- Fixed two vulture findings (unused ``signum`` / ``frame`` parameters
+  in the SIGINT handler, renamed to ``_signum`` / ``_frame``).
+- Fixed six refurb findings (``list(x)`` -> ``x.copy()`` style
+  modernizations, plus one ``{**a, **b}`` -> ``a | b`` dict-merge).
+- Refurb still flags one false positive in ``cli.py``
+  (``args = parser.parse_args(...)`` then ``return int(args.func(args))``,
+  which can't be chained because ``args`` is used twice). Left as-is.
+
 ## [0.0.24] - 2026-05-21
 
 ### Added
@@ -722,4 +754,5 @@ Initial alpha release.
 [0.0.22]: https://github.com/msradam/ansiburr/releases/tag/v0.0.22
 [0.0.23]: https://github.com/msradam/ansiburr/releases/tag/v0.0.23
 [0.0.24]: https://github.com/msradam/ansiburr/releases/tag/v0.0.24
-[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.24...HEAD
+[0.0.25]: https://github.com/msradam/ansiburr/releases/tag/v0.0.25
+[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.25...HEAD
