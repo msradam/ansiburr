@@ -6,9 +6,9 @@ ansiburr makes Ansible's catalog of modules the action space for AI agents that 
 
 The same primitives also work for non-agent IT automation. Ansible modules expose as Burr `@action` objects, ordinary Python `@action` functions compose freely between them, and the resulting graph runs, persists, and traces through Burr's standard tooling. The conversion path lifts an existing playbook into the same observable Burr `Application` without rewriting any YAML.
 
-![ansiburr converting a multi-feature Ansible playbook into a Burr FSM and walking it step by step](https://raw.githubusercontent.com/msradam/ansiburr/main/vhs/conversion.gif)
+![mast_sre_agent: LLM picks a remediation label, a validator gates the pick, the FSM enforces verify-before-done](https://raw.githubusercontent.com/msradam/ansiburr/main/vhs/sre_agent.gif)
 
-The recording above is the converter walking a single Ansible playbook (`set_fact`, `block`, `loop`, `notify`/`handlers`, `changed_when`) lifted into a Burr `Application` via `ansiburr.from_playbook(...)`. Every Ansible task is a discrete observable Burr step, and so is every loop iteration, every notify marker, and every handler. The agent-side counterpart runs in [`examples/mast_sre_agent/`](./examples/mast_sre_agent/): a Granite model served by Ollama picks remediation labels, a deterministic validator gates off-script picks, the FSM enforces a verification step before any success terminal.
+The recording above is `examples/mast_sre_agent/` running end-to-end. A Granite model served by Ollama parses a log summary and picks one label from a fixed allow-list (the magenta lines). A deterministic validator action checks the pick against the allow-list and writes a `validation_note`. The FSM then routes through the chosen remediation chain (six Ansible modules for the OOM path), runs an external verification step, and only declares `done` when the verify came back HTTP 200. Off-script picks from the model would route to `escalate` instead, never to `done`.
 
 ## What you can build
 
@@ -106,6 +106,10 @@ Working examples of each are in [`examples/`](./examples/).
 ## From an existing playbook
 
 If you already have an Ansible playbook, `from_playbook(...)` lifts it into a runnable Burr `Application` without rewriting the YAML. The full demo lives in [`examples/from_playbook/`](./examples/from_playbook/).
+
+![ansiburr converting a multi-feature Ansible playbook into a Burr FSM and walking it step by step](https://raw.githubusercontent.com/msradam/ansiburr/main/vhs/conversion.gif)
+
+The recording above is the converter walking a single Ansible playbook (`set_fact`, `block`, `loop`, `notify`/`handlers`, `changed_when`) lifted into a Burr `Application`. Every Ansible task is a discrete observable Burr step, and so is every loop iteration, every notify marker, and every handler.
 
 For a sense of how much of the wild ansiburr ingests: **all six** of the most-downloaded `geerlingguy` roles (the de facto Galaxy benchmark) convert directly from their unmodified published source.
 
