@@ -6,7 +6,9 @@ Run Ansible modules as Burr state-machine actions in Python.
 
 A single decorator wraps an Ansible module call as a Burr `@action`. The module runs through `ansible-runner` against the target host. Its result projects into Burr's `State`, and the action's `_last_failed`, `_last_changed`, and `_last_msg` flags become available to downstream transitions. The output is a standard Burr `Application` that runs, persists, traces, and serves like any other Burr graph.
 
-![ansiburr stepping through a deploy-and-wait FSM with a polling sub-graph](vhs/hero.gif)
+![ansiburr converting a multi-feature Ansible playbook into a Burr FSM and walking it step by step](https://raw.githubusercontent.com/msradam/ansiburr/main/vhs/conversion.gif)
+
+The GIF above is a single Ansible playbook (`set_fact`, `block`, `loop`, `notify`/`handlers`, `changed_when`) lifted into a Burr Application via `ansiburr.from_playbook(...)` and walked one action at a time. Every Ansible task is a discrete observable Burr step, and so is every loop iteration, every notify marker, and every handler. No opaque ansible-playbook invocation in the middle of the trace. The playbook driving it is at [`examples/from_playbook_advanced/playbook.yml`](./examples/from_playbook_advanced/playbook.yml); the walker is at [`examples/from_playbook_walker.py`](./examples/from_playbook_walker.py).
 
 ## What you can build
 

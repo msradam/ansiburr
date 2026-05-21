@@ -6,6 +6,30 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.9] - 2026-05-21
+
+### Added
+
+- ``examples/from_playbook_walker.py``: a colored step-by-step walker
+  that runs ``ansiburr.from_playbook(...)`` on the advanced demo playbook
+  and prints each emitted action as a discrete observable step. Renders
+  the conversion story at the command line: set_fact lowering, block
+  expansion, loop iteration, notify-marker, changed_when post-action,
+  handler firing, all visible.
+- ``vhs/conversion.gif`` + ``vhs/conversion.tape``: VHS recording of the
+  walker against the advanced playbook. 17 distinct FSM steps from a
+  single playbook conversion.
+- README hero swapped from the wait_until polling demo to the new
+  conversion walker; tells the playbook -> FSM story at the top of the
+  page.
+
+### Fixed
+
+- README image URLs converted from repo-relative paths to absolute
+  GitHub raw URLs. PyPI's long-description renderer does not resolve
+  relative paths, so the v0.0.5 - v0.0.8 PyPI pages had broken hero
+  images. v0.0.9 onward renders correctly on both GitHub and PyPI.
+
 ## [0.0.8] - 2026-05-21
 
 ### Added
@@ -271,4 +295,5 @@ Initial alpha release.
 [0.0.6]: https://github.com/msradam/ansiburr/releases/tag/v0.0.6
 [0.0.7]: https://github.com/msradam/ansiburr/releases/tag/v0.0.7
 [0.0.8]: https://github.com/msradam/ansiburr/releases/tag/v0.0.8
-[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.8...HEAD
+[0.0.9]: https://github.com/msradam/ansiburr/releases/tag/v0.0.9
+[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.9...HEAD
