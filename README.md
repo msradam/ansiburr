@@ -4,7 +4,7 @@ Run Ansible modules as Burr state-machine actions in Python.
 
 A single decorator wraps an Ansible module call as a Burr `@action`. The module runs through `ansible-runner` against the target host. Its result projects into Burr's `State`, and the action's `_last_failed`, `_last_changed`, and `_last_msg` flags become available to downstream transitions. The output is a standard Burr `Application` that runs, persists, traces, and serves like any other Burr graph.
 
-![ansiburr stepping through a six-action FSM](vhs/hero.gif)
+![ansiburr stepping through a deploy-and-wait FSM with a polling sub-graph](vhs/hero.gif)
 
 ## What you can build
 

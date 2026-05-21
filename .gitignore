@@ -22,6 +22,7 @@ examples/service_remediation/.demo_key.pub
 
 # Local demo state co-located with each example
 examples/coffee_order_ansible/.queue/
+examples/.hero-state/
 
 # Burr local tracker output (project-relative if anyone re-roots HOME)
 .burr/
