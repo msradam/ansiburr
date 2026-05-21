@@ -1,7 +1,7 @@
 [project]
 name = "ansiburr"
 version = "0.0.1"
-description = "Author Ansible-module-backed Burr state machines as ordinary Python."
+description = "Run Ansible modules as Burr state-machine actions in Python."
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
 license = "Apache-2.0"
