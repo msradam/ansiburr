@@ -2,21 +2,40 @@
 
 > *Pardon me, are you Ansi-Burr, Sir?*
 
-Run Ansible modules as Burr state-machine actions in Python.
+ansiburr makes Ansible's catalog of modules the action space for AI agents that operate infrastructure. An LLM picks one label from a fixed allow-list, an explicit Burr state machine decides what is reachable next, and every step is captured in the trace with full Ansible module output. The FSM owns termination, retry policy, validation-before-done, and recovery edges, not the model.
 
-A single decorator wraps an Ansible module call as a Burr `@action`. The module runs through `ansible-runner` against the target host. Its result projects into Burr's `State`, and the action's `_last_failed`, `_last_changed`, and `_last_msg` flags become available to downstream transitions. The output is a standard Burr `Application` that runs, persists, traces, and serves like any other Burr graph.
+The same primitives also work for non-agent IT automation. Ansible modules expose as Burr `@action` objects, ordinary Python `@action` functions compose freely between them, and the resulting graph runs, persists, and traces through Burr's standard tooling. The conversion path lifts an existing playbook into the same observable Burr `Application` without rewriting any YAML.
 
 ![ansiburr converting a multi-feature Ansible playbook into a Burr FSM and walking it step by step](https://raw.githubusercontent.com/msradam/ansiburr/main/vhs/conversion.gif)
 
-The GIF above is a single Ansible playbook (`set_fact`, `block`, `loop`, `notify`/`handlers`, `changed_when`) lifted into a Burr Application via `ansiburr.from_playbook(...)` and walked one action at a time. Every Ansible task is a discrete observable Burr step, and so is every loop iteration, every notify marker, and every handler. No opaque ansible-playbook invocation in the middle of the trace. The playbook driving it is at [`examples/from_playbook_advanced/playbook.yml`](./examples/from_playbook_advanced/playbook.yml); the walker is at [`examples/from_playbook_walker.py`](./examples/from_playbook_walker.py).
+The recording above is the converter walking a single Ansible playbook (`set_fact`, `block`, `loop`, `notify`/`handlers`, `changed_when`) lifted into a Burr `Application` via `ansiburr.from_playbook(...)`. Every Ansible task is a discrete observable Burr step, and so is every loop iteration, every notify marker, and every handler. The agent-side counterpart runs in [`examples/mast_sre_agent/`](./examples/mast_sre_agent/): a Granite model served by Ollama picks remediation labels, a deterministic validator gates off-script picks, the FSM enforces a verification step before any success terminal.
 
 ## What you can build
 
+- SRE agents where an LLM picks one label from a fixed allow-list and the FSM (not the model) enforces termination, retry policy, and verification before declaring success. The relevant research arguments are the MAST failure taxonomy (arXiv:2503.13657) and STRATUS on FSM-structured SRE agents (arXiv:2506.02009).
 - Self-healing service workflows that observe, decide, and remediate one Ansible module at a time, with every step visible in Burr's tracker.
-- SRE agents where an LLM picks one label from a fixed allow-list of remediation actions and the FSM (not the model) enforces termination and retry policy.
 - Cross-platform automation that gathers facts on the target up front and dispatches to the right modules based on the OS family, init system, or package manager.
 - Plan-then-apply pipelines using Ansible's `--check` and `--diff` with a deterministic review gate before any change runs.
 - Polling sub-graphs (port readiness, service health, file existence) where every poll attempt is a discrete step in the trace.
+
+## Why the FSM owns the control flow
+
+The dominant pattern for LLM-driven infrastructure agents today is a ReAct-style loop. The model writes JSON tool calls into a chat history, the runtime executes them, the result feeds back into the context, repeat. That model has well-documented failure modes (Multi-Agent System failure Taxonomy, IBM Research + UC Berkeley, arXiv:2503.13657):
+
+- **FM-1.5 Unaware of Termination Conditions**. The model loops past where it should stop, or stops before it has verified the work.
+- **FM-2.6 Reasoning-Action Mismatch**. The model picks an action that does not match the intent it just stated.
+- **FM-3.3 Incorrect Verification**. The model declares success without running a check that proves the work landed.
+
+ansiburr addresses these structurally rather than behaviorally. The FSM is the substrate, not the chat history. The LLM is a labeled choice between typed transitions, not a free-running interpreter.
+
+- Termination lives in the FSM. The model picks one label from a fixed allow-list, the FSM transitions on the label, and the model cannot pick an action that is not reachable from the current state, cannot loop forever, and cannot skip a verification step the FSM places between remediation and success.
+- A deterministic validator action sits between the model's pick and the consumption. It checks the label against the allow-list. Off-script picks route to a recovery branch instead of being treated as valid.
+- Verification is its own FSM node with its own pre-condition. The remediation must have run, and the only transition out of remediation passes through verify.
+- The trace shows which label the model picked, whether the validator accepted it, which Ansible modules ran, what each module returned, which transition fired next, and when the FSM declared the work done. None of that is model self-report.
+
+`examples/mast_sre_agent/` runs this end-to-end against a Granite model via Ollama. The block / rescue / always lowering aligns with STRATUS's Transactional No-Regression formalism: a failure inside a block routes to its rescue chain, a successful rescue clears the latched failure, and an always chain runs in both cases.
+
+For workflows without a model in the loop, the same primitives still buy observability and composability. Plain IT automation gets per-step traces, persistence, and free composition between Ansible modules and Python `@action` functions through Burr's standard tooling.
 
 ## Install
 
