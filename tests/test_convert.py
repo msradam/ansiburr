@@ -156,6 +156,21 @@ def test_gather_facts_projects_ansible_facts_into_state() -> None:
     )
 
 
+def test_jinja_filters_in_when_translate_to_python() -> None:
+    """A ``when:`` clause with common Jinja filters (``| length``, ``| first``)
+    and tests (``is defined``) is translated to equivalent Python at
+    conversion time, so the FSM evaluates the predicate cleanly."""
+    app = ansiburr.from_playbook(FIXTURES / "playbook_jinja_filters.yml")
+    last, _, final = app.run(halt_after=["done", "escalate"])
+    assert last.name == "done"
+    # ``paths_list | length > 0`` is true; the skip task ran.
+    assert final["skip_marker"] is False
+    # ``label_dict is defined`` is true; defined task ran.
+    assert final["defined_marker"] is True
+    # ``(paths_list | first) == "/etc/foo"`` is true; default task ran.
+    assert final["defaulted"] == "fallback"
+
+
 def test_templated_include_vars_resolves_at_runtime() -> None:
     """``include_vars: "{{ pkg_mgr }}-vars.yml"`` renders the path against
     current state at task time and loads the matching YAML. Searches the

@@ -491,29 +491,110 @@ def _when_to_expr_string(when: Any) -> str:
 
 def _translate_register_dot_access(expr_text: str, registers: Iterable[str]) -> str:
     """Translate ``register.attr.attr2`` to ``register["attr"]["attr2"]`` for
-    every registered name.
+    every registered name, plus the implicit ``item`` loop variable.
 
-    Ansible's ``when:`` and ``failed_when:`` expressions use Jinja-style
-    attribute access on registered results (``result.rc == 0``). Burr's
-    ``expr()`` uses Python ``eval``, and Python dicts don't support attribute
-    access. This rewriter converts the simple case (chained ``.attr`` on a
-    bare register name) to bracket access. More complex Jinja syntax
-    (filters, ``is defined`` tests) is left as-is and will fail at expression
-    evaluation time with a Python error pointing at the unsupported feature.
+    Numeric segments (``item.1``, ``result.0.path``) become integer indices
+    rather than string keys; non-numeric segments become string keys. This
+    matches Ansible's Jinja attribute access semantics, where ``item.1`` is
+    list indexing and ``item.path`` is dict-key access.
     """
-    register_set = set(registers)
-    if not register_set:
-        return expr_text
-    # Match: word-boundary register name + one or more ``.attr`` accesses.
+    # ``item`` is always rewritten because it's the implicit loop-variable
+    # name Ansible exposes inside any ``loop:`` / ``with_items:`` /
+    # ``with_subelements:`` body.
+    register_set = set(registers) | {"item"}
+    # Match: word-boundary name + one or more ``.<segment>`` accesses where
+    # each segment is either an identifier or a digit run.
     name_alt = "|".join(re.escape(r) for r in register_set)
-    pattern = re.compile(rf"\b(?P<name>{name_alt})(?P<chain>(?:\.[A-Za-z_]\w*)+)\b")
+    pattern = re.compile(
+        rf"\b(?P<name>{name_alt})(?P<chain>(?:\.(?:[A-Za-z_]\w*|\d+))+)\b"
+    )
 
     def _rewrite(match: re.Match[str]) -> str:
         name = match.group("name")
         attrs = match.group("chain").lstrip(".").split(".")
-        return name + "".join(f"[{attr!r}]" for attr in attrs)
+        out = name
+        for attr in attrs:
+            if attr.isdigit():
+                out += f"[{int(attr)}]"
+            else:
+                out += f"[{attr!r}]"
+        return out
 
     return pattern.sub(_rewrite, expr_text)
+
+
+def _translate_jinja_expr(expr_text: str) -> str:
+    """Best-effort translation of common Jinja expression idioms into Python.
+
+    Handles the filters / tests playbook authors reach for most often in
+    ``when:`` and ``failed_when:`` clauses:
+
+    - ``X is defined`` -> ``(X is not None)``
+    - ``X is not defined`` -> ``(X is None)``
+    - ``X | length`` -> ``len(X)``
+    - ``X | list`` -> ``list(X)``
+    - ``X | first`` -> ``(X)[0]``
+    - ``X | last`` -> ``(X)[-1]``
+    - ``X | upper`` / ``| lower`` / ``| int`` / ``| string`` -> obvious Python
+    - ``X | default(Y)`` -> ``(X if X is not None else Y)``
+
+    Anything outside these patterns is left alone. Brittle by design: when
+    a converted playbook tries to evaluate something this rewriter can't
+    handle, the eval error message names the unsupported chunk, which is
+    more useful than an opaque conversion-time refusal.
+    """
+    text = expr_text
+
+    # ``is defined`` / ``is not defined`` -> not-None / is-None.
+    text = re.sub(r"\b(\w[\w.\[\]'\"]*)\s+is\s+not\s+defined\b", r"(\1 is None)", text)
+    text = re.sub(r"\b(\w[\w.\[\]'\"]*)\s+is\s+defined\b", r"(\1 is not None)", text)
+
+    # Parenthesized expressions first so ``(... | last)`` matches before
+    # the bare-identifier patterns; otherwise the bare matcher swallows
+    # the closing ``)`` and produces invalid Python.
+    _filter_repls_paren = [
+        (r"\(\s*([^()]+?)\s*\)\s*\|\s*length\b", r"len(\1)"),
+        (r"\(\s*([^()]+?)\s*\)\s*\|\s*list\b", r"list(\1)"),
+        (r"\(\s*([^()]+?)\s*\)\s*\|\s*first\b", r"(\1)[0]"),
+        (r"\(\s*([^()]+?)\s*\)\s*\|\s*last\b", r"(\1)[-1]"),
+        (r"\(\s*([^()]+?)\s*\)\s*\|\s*upper\b", r"(\1).upper()"),
+        (r"\(\s*([^()]+?)\s*\)\s*\|\s*lower\b", r"(\1).lower()"),
+        (r"\(\s*([^()]+?)\s*\)\s*\|\s*int\b", r"int(\1)"),
+        (r"\(\s*([^()]+?)\s*\)\s*\|\s*string\b", r"str(\1)"),
+    ]
+    # Bare-identifier patterns: ``foo['x'].bar | last``. The character class
+    # explicitly excludes ``|`` and ``(`` so the regex doesn't greedy-match
+    # across a previous filter pipe.
+    _ident_chars = r"[A-Za-z_\w\.\[\]'\"]"
+    _filter_repls_ident = [
+        (rf"({_ident_chars}+)\s*\|\s*length\b", r"len(\1)"),
+        (rf"({_ident_chars}+)\s*\|\s*list\b", r"list(\1)"),
+        (rf"({_ident_chars}+)\s*\|\s*first\b", r"(\1)[0]"),
+        (rf"({_ident_chars}+)\s*\|\s*last\b", r"(\1)[-1]"),
+        (rf"({_ident_chars}+)\s*\|\s*upper\b", r"(\1).upper()"),
+        (rf"({_ident_chars}+)\s*\|\s*lower\b", r"(\1).lower()"),
+        (rf"({_ident_chars}+)\s*\|\s*int\b", r"int(\1)"),
+        (rf"({_ident_chars}+)\s*\|\s*string\b", r"str(\1)"),
+    ]
+    # Apply repeatedly so chained filters (``X | list | length``) collapse.
+    for _ in range(4):
+        for pattern, repl in _filter_repls_paren + _filter_repls_ident:
+            text = re.sub(pattern, repl, text)
+
+    # ``| default(Y)`` -- needs to capture both the value and the default
+    # so they can be combined into a ternary.
+    text = re.sub(
+        r"\(\s*([^()]+?)\s*\)\s*\|\s*default\(\s*([^()]+?)\s*\)",
+        r"(\1 if \1 is not None else \2)",
+        text,
+    )
+    text = re.sub(
+        rf"({_ident_chars}+)\s*\|\s*default\(\s*([^()]+?)\s*\)",
+        r"(\1 if \1 is not None else \2)",
+        text,
+    )
+
+    return text  # noqa: RET504  # ``text`` is built up by the repeated regex subs above
 
 
 def _build_task_action(
@@ -1978,14 +2059,18 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
 
     # Translate Jinja-style attribute access on registered names into the
     # bracket access Python's eval expects. ``known_registers`` was assembled
-    # while walking the logical sequence.
+    # while walking the logical sequence. The Jinja translator handles
+    # common filters (``| length``, ``| default``, ``| last``, etc.) and
+    # tests (``is defined`` / ``is not defined``) so converted ``when:``
+    # clauses lifted from real-world playbooks evaluate cleanly.
+    def _translate_when(c: str) -> str:
+        return _translate_jinja_expr(_translate_register_dot_access(c, known_registers))
+
     when_clauses = [
-        _translate_register_dot_access(c, known_registers) if c is not None else None
-        for c in when_clauses
+        _translate_when(c) if c is not None else None for c in when_clauses
     ]
     failed_when_clauses = [
-        _translate_register_dot_access(c, known_registers) if c is not None else None
-        for c in failed_when_clauses
+        _translate_when(c) if c is not None else None for c in failed_when_clauses
     ]
 
     # ------------------------------------------------------------------

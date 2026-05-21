@@ -6,6 +6,42 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.21] - 2026-05-21
+
+The last geerling holdout closes. **All six** of the most-downloaded
+geerlingguy roles now convert from their unmodified published source.
+
+  ansible-role-docker      63 actions, 205 transitions
+  ansible-role-nginx       40 actions, 153 transitions
+  ansible-role-mysql       78 actions, 265 transitions
+  ansible-role-postgresql  63 actions, 186 transitions
+  ansible-role-redis       13 actions,  27 transitions
+  ansible-role-php        101 actions, 312 transitions
+
+### Added
+
+- Converter: best-effort Jinja-expression-to-Python translation for
+  ``when:`` and ``failed_when:`` clauses. Supports:
+  - ``X is defined`` -> ``(X is not None)``
+  - ``X is not defined`` -> ``(X is None)``
+  - ``X | length`` -> ``len(X)``
+  - ``X | list`` -> ``list(X)``
+  - ``X | first`` / ``| last`` -> ``[0]`` / ``[-1]``
+  - ``X | upper`` / ``| lower`` -> ``.upper()`` / ``.lower()``
+  - ``X | int`` / ``| string`` -> ``int(X)`` / ``str(X)``
+  - ``X | default(Y)`` -> ``(X if X is not None else Y)``
+  Chained filters collapse (``X | list | length`` -> ``len(list(X))``).
+- Numeric dot access in register chains (``item.1.path``) is now
+  translated to integer indexing (``item[1]['path']``), matching how
+  Ansible interprets ``item.<number>``. The implicit ``item`` loop
+  variable is always treated as a known register.
+
+### Tests
+
+- New positive test exercises a ``when:`` with ``| length``, ``| first``,
+  ``| default``, and ``is defined`` against play-level vars and resolves
+  cleanly.
+
 ## [0.0.20] - 2026-05-21
 
 ### Documented
@@ -602,4 +638,5 @@ Initial alpha release.
 [0.0.18]: https://github.com/msradam/ansiburr/releases/tag/v0.0.18
 [0.0.19]: https://github.com/msradam/ansiburr/releases/tag/v0.0.19
 [0.0.20]: https://github.com/msradam/ansiburr/releases/tag/v0.0.20
-[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.20...HEAD
+[0.0.21]: https://github.com/msradam/ansiburr/releases/tag/v0.0.21
+[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.21...HEAD
