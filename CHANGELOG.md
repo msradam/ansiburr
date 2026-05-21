@@ -6,6 +6,33 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.19] - 2026-05-21
+
+### Added
+
+- Converter: ``with_subelements:`` (nested-iteration lookup) lowers to
+  the same three-action loop sub-FSM ``loop:`` uses. The 2-element list
+  ``with_subelements: ["{{ parents_template }}", subkey]`` is flattened
+  at task time into a list of ``[parent, sub]`` items so the loop body
+  sees ``item.0`` = parent and ``item.1`` = sub, matching Ansible.
+  Geerlingguy php's ``configure-opcache`` and ``configure-apcu`` tasks
+  use this idiom.
+
+### Geerlingguy role conversion status
+
+| Role | Status |
+|---|---|
+| ansible-role-docker | 63 actions, 205 transitions |
+| ansible-role-nginx | 40 actions, 153 transitions |
+| ansible-role-mysql | 78 actions, 265 transitions |
+| ansible-role-postgresql | 63 actions, 186 transitions |
+| ansible-role-redis | 13 actions, 27 transitions |
+| ansible-role-php | structural conversion succeeds (with_subelements is now lowered); failure has moved to a different layer: a ``when:`` clause uses Jinja filter syntax (``\| last``) that Python's ``eval`` can't parse |
+
+The remaining php blocker is the Jinja-vs-Python expression grammar
+mismatch in ``when:`` clauses, which is a different class of work
+than the structural lowerings shipped in v0.0.4-v0.0.19.
+
 ## [0.0.18] - 2026-05-21
 
 Five of the six most-downloaded geerlingguy roles now convert:
@@ -564,4 +591,5 @@ Initial alpha release.
 [0.0.16]: https://github.com/msradam/ansiburr/releases/tag/v0.0.16
 [0.0.17]: https://github.com/msradam/ansiburr/releases/tag/v0.0.17
 [0.0.18]: https://github.com/msradam/ansiburr/releases/tag/v0.0.18
-[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.17...HEAD
+[0.0.19]: https://github.com/msradam/ansiburr/releases/tag/v0.0.19
+[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.19...HEAD

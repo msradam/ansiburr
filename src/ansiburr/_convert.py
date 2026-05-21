@@ -136,14 +136,16 @@ _RESERVED_TASK_KEYS: frozenset[str] = frozenset(
 # expanded; ``rescue``/``always`` still raise (deferred to a later release).
 _FLATTEN_TASK_KEYS: frozenset[str] = frozenset({"include_tasks", "import_tasks", "block"})
 
-# ``loop:`` and ``with_items:`` are now first-class. ``with_dict``/
-# ``with_fileglob``/``with_subelements`` would each need their own item-
-# producing semantics; they still raise. ``with_first_found:`` is handled
-# specially when paired with ``include_vars: "{{ item }}"`` because that
-# combination is just a different syntax for the first_found lookup.
+# ``loop:`` and ``with_items:`` are now first-class. ``with_subelements:``
+# is also lowered (parent-list * subkey nested iteration). ``with_dict``
+# and ``with_fileglob`` would each need their own item-producing semantics;
+# they still raise. ``with_first_found:`` is handled specially when paired
+# with ``include_vars: "{{ item }}"`` because that combination is just a
+# different syntax for the first_found lookup.
 _LOOP_KEYS: frozenset[str] = frozenset({"loop", "with_items"})
 
 _WITH_FIRST_FOUND_KEYS: frozenset[str] = frozenset({"with_first_found"})
+_WITH_SUBELEMENTS_KEYS: frozenset[str] = frozenset({"with_subelements"})
 
 _UNSUPPORTED_TASK_KEYS: frozenset[str] = frozenset(
     {
@@ -151,7 +153,6 @@ _UNSUPPORTED_TASK_KEYS: frozenset[str] = frozenset(
         "always",
         "with_dict",
         "with_fileglob",
-        "with_subelements",
         "import_role",
         "include",
         "include_role",
@@ -202,7 +203,13 @@ def _module_from_task(task: Mapping[str, Any]) -> tuple[str, Any]:
             raise UnsupportedPlaybookConstruct(
                 f"task uses unsupported construct {key!r}: {task.get('name', task)}"
             )
-    excluded = _RESERVED_TASK_KEYS | _FLATTEN_TASK_KEYS | _LOOP_KEYS | _WITH_FIRST_FOUND_KEYS
+    excluded = (
+        _RESERVED_TASK_KEYS
+        | _FLATTEN_TASK_KEYS
+        | _LOOP_KEYS
+        | _WITH_FIRST_FOUND_KEYS
+        | _WITH_SUBELEMENTS_KEYS
+    )
     module_keys = [k for k in task if k not in excluded]
     if not module_keys:
         raise ValueError(f"task has no module reference: {task}")
@@ -587,7 +594,7 @@ def _build_loop_init(
     item_state_key: str,
     idx_state_key: str,
     done_state_key: str,
-    items_or_template: list[Any] | str,
+    items_or_template: list[Any] | str | tuple[str, str, str],
     play_vars: Mapping[str, Any] | None = None,
 ) -> Any:
     """Build the pure-Python action that seeds the loop's iteration state.
@@ -604,13 +611,47 @@ def _build_loop_init(
     pinned_vars = dict(play_vars or {})
 
     def _resolve_items(state: State) -> list[Any]:
+        # Literal list: return as-is.
         if isinstance(items_or_template, list):
             return list(items_or_template)
+
         context: dict[str, Any] = {**pinned_vars}
         for key, value in state.get_all().items():
             if key.startswith("_"):
                 continue
             context.setdefault(key, value)
+
+        # ``with_subelements`` spec: ("subelements", parent_template, subkey).
+        # Render the parent template, then for each parent dict yield
+        # (parent, sub) pairs by reading parent[subkey]. The loop body sees
+        # item[0] = parent and item[1] = sub, matching Ansible semantics.
+        if (
+            isinstance(items_or_template, tuple)
+            and len(items_or_template) == 3
+            and items_or_template[0] == "subelements"
+        ):
+            _, parent_template, subkey = items_or_template
+            parent_rendered = _render_jinja(parent_template, context)
+            if isinstance(parent_rendered, str):
+                try:
+                    parent_list = ast.literal_eval(parent_rendered.strip())
+                except (ValueError, SyntaxError):
+                    parent_list = []
+            elif isinstance(parent_rendered, list):
+                parent_list = parent_rendered
+            else:
+                parent_list = []
+            flat: list[Any] = []
+            for parent in parent_list:
+                if not isinstance(parent, Mapping):
+                    continue
+                subs = parent.get(subkey) or []
+                if not isinstance(subs, list):
+                    continue
+                flat.extend([parent, sub] for sub in subs)
+            return flat
+
+        # Jinja-templated list value.
         rendered = _render_jinja(items_or_template, context)
         if isinstance(rendered, list):
             return list(rendered)
@@ -1487,7 +1528,11 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
         # until the items are exhausted. The task action reads the current
         # item from a dedicated state key and exposes it as ``{{ item }}``
         # in the rendered Jinja context, matching Ansible's variable naming.
-        if "loop" in task or "with_items" in task:
+        if (
+            "loop" in task
+            or "with_items" in task
+            or "with_subelements" in task
+        ):
             base_py = _slugify(raw_name)
             init_py = _unique(f"{base_py}_loop_init")
             task_py = _unique(base_py)
@@ -1496,7 +1541,24 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
             item_key = f"_loop_{task_py}_item"
             idx_key = f"_loop_{task_py}_idx"
             done_key = f"_loop_{task_py}_done"
-            items = _loop_items_from_task(task)
+            if "with_subelements" in task:
+                # ``with_subelements: [parent_list_template, subkey]`` flattens
+                # parent-list * subkey into 2-element [parent, sub] items.
+                wse = task["with_subelements"]
+                if not isinstance(wse, list) or len(wse) < 2:
+                    raise ValueError(
+                        "with_subelements: must be a list of at least 2 items "
+                        "(parent template, subkey)"
+                    )
+                parent_template = str(wse[0])
+                subkey = str(wse[1])
+                items: list[Any] | str | tuple[str, str, str] = (
+                    "subelements",
+                    parent_template,
+                    subkey,
+                )
+            else:
+                items = _loop_items_from_task(task)
             module, args = _module_from_task(task)
             register = task.get("register")
             become = bool(task.get("become", play_become))
