@@ -1,41 +1,64 @@
 """Convert Ansible YAML playbooks into ansiburr/Burr ``Application`` objects.
 
 Supports the subset of Ansible's playbook syntax that maps cleanly to a
-single-host, flat-task FSM:
+single-host FSM:
 
-  - One play (multi-play raises :class:`UnsupportedPlaybookConstruct`).
+  - One play per file (multi-play raises :class:`UnsupportedPlaybookConstruct`).
   - Tasks with a name, exactly one module reference, and a module-args dict.
-  - ``when:`` predicates (string expressions; lists are AND-joined).
-  - ``register:`` capturing the full module result (mapped to ansiburr's
-    ``register=`` projection).
+  - ``when:`` predicates (string expressions; lists are AND-joined). Jinja-
+    style attribute access on registered names (``result.rc == 0``) is
+    translated to Python bracket access (``result['rc'] == 0``) so Burr's
+    ``expr()`` can evaluate the predicate.
+  - ``register:`` capturing the full module result into a state key.
   - ``become:`` per-task or per-play.
-  - ``failed_when:`` and ``ignore_errors:`` as guard transitions; failed
-    tasks route to an auto-generated ``escalate`` terminal unless the play
-    sets ``ignore_errors: yes`` for the task.
-  - ``gather_facts: yes`` lowers to a leading :meth:`Host.gather_facts` action.
+  - ``failed_when:`` and ``ignore_errors:`` as guard transitions. Failed
+    tasks route to an auto-generated ``escalate`` terminal unless
+    ``ignore_errors: yes`` is set.
+  - ``gather_facts: yes`` lowers to a leading ``ansible.builtin.setup`` action.
   - Play-level ``vars:`` populate ``with_state(...)``.
+  - ``block:`` (group-only) inlines its tasks with the block's ``when:``
+    AND-propagated to each inner task. ``rescue:`` / ``always:`` still raise.
+  - ``include_tasks:`` and ``import_tasks:`` with a literal filesystem path
+    read the referenced file and inline its tasks at conversion time, with
+    outer ``when:`` and ``notify:`` propagating to every leaf.
+  - ``notify:`` + ``handlers:`` round-trip: each notifying task gets a
+    synthesized notify-marker that flips a ``_notified_<slug>`` flag when
+    ``_last_changed`` is true; handlers are appended after the main tasks
+    and gated on their flag.
+  - ``loop:`` and ``with_items:`` with a literal list lower into a
+    three-action sub-FSM (init -> task -> advance with a back-edge until
+    the items are exhausted). The task body sees ``{{ item }}`` in its
+    Jinja context.
+  - Jinja templates inside task arguments referencing registered values
+    are rendered using Burr state per task, so a converted ``msg: "{{ git_check.stdout }}"``
+    resolves across plays.
 
 The following constructs raise :class:`UnsupportedPlaybookConstruct` with
 the offending node:
 
-  - ``block`` / ``rescue`` / ``always``
-  - ``loop`` / ``with_items`` / ``with_*``
-  - ``notify`` + handlers
-  - ``import_playbook`` / ``import_tasks`` / ``include_*``
+  - ``rescue:`` / ``always:`` (deferred to a later release as
+    STRATUS-style undo/transactional edges)
+  - ``loop_control:``, ``with_dict``, ``with_fileglob``, ``with_subelements``
+  - Jinja-templated ``loop:`` / ``with_items:`` values (only literal lists
+    are lowered)
+  - Jinja-templated ``include_tasks:`` / ``import_tasks:`` paths
+  - ``import_role:``, ``include_role:``, ``include:``
   - ``roles:`` blocks
-  - ``serial:`` / ``max_fail_percentage:`` strategy keywords
+  - ``pre_tasks:`` / ``post_tasks:``
+  - ``serial:`` / ``strategy:`` / ``max_fail_percentage:`` / ``any_errors_fatal:``
+  - Multi-play files
 
-The output is a runnable :class:`burr.core.Application` whose actions are
-ansiburr ``@module_action`` decorations of each task. Pure-Python actions
-in the FSM (the ``escalate`` terminal, the optional ``gather_facts``
-step) are added automatically.
+The output is a runnable :class:`burr.core.Application`. Module tasks are
+``@module_action`` decorations under the hood; loop init, loop advance,
+notify markers, and the ``escalate`` / ``done`` terminals are pure
+Python ``@action`` nodes.
 
 Example::
 
     from ansiburr import from_playbook
 
     app = from_playbook("playbook.yml")
-    last, _, final = app.run(halt_after=["task_3", "escalate"])
+    last, _, final = app.run(halt_after=["done", "escalate"])
 """
 
 from __future__ import annotations
