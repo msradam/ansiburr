@@ -39,10 +39,30 @@ def test_register_capture_lands_in_state() -> None:
     assert ping.get("ping") == "pong"
 
 
-def test_block_with_rescue_still_raises() -> None:
-    """``block:`` group-only is supported; ``block: + rescue:/always:`` is not."""
-    with pytest.raises(ansiburr.UnsupportedPlaybookConstruct, match="rescue"):
+def test_block_with_always_still_raises() -> None:
+    """``block:`` group-only and ``block: + rescue:`` are supported.
+    ``block: + always:`` is not yet."""
+    with pytest.raises(ansiburr.UnsupportedPlaybookConstruct, match="always"):
         ansiburr.from_playbook(FIXTURES / "playbook_unsupported_block.yml")
+
+
+def test_block_plus_rescue_runs_rescue_on_block_failure() -> None:
+    """A deliberate ``ansible.builtin.fail`` inside ``block:`` must:
+      - stop block execution at the failure point,
+      - run the rescue chain,
+      - clear the failure sentinels so post-block tasks run cleanly,
+      - reach ``done`` (not ``escalate``).
+    """
+    app = ansiburr.from_playbook(FIXTURES / "playbook_block_rescue.yml")
+    last, _, final = app.run(halt_after=["done", "escalate"])
+    assert last.name == "done"
+    # The rescue chain ran: ``record_rescue`` set ``rescued=True``.
+    assert final["rescued"] is True
+    # The clear-failure post-action wiped ``_last_failed`` before the
+    # post-block task executed; ``_last_failed`` is False at the end.
+    assert final["_last_failed"] is False
+    # The post-block task executed and registered a result.
+    assert final["post_probe"]["ping"] == "pong"
 
 
 def test_jinja_templated_loop_still_raises() -> None:

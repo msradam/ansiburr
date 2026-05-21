@@ -273,13 +273,49 @@ def _flatten_tasks(
         combined_notify = inherited_notify + task_notify
 
         if "block" in task:
-            if "rescue" in task or "always" in task:
+            if "always" in task:
                 raise UnsupportedPlaybookConstruct(
-                    f"rescue:/always: are not supported; task: {task.get('name', '<unnamed>')!r}"
+                    "always: clauses on block: are not yet supported "
+                    f"(task: {task.get('name', '<unnamed>')!r}); "
+                    "rescue: alone is supported as of v0.0.10"
                 )
             block_tasks = task["block"]
             if not isinstance(block_tasks, list):
                 raise ValueError(f"block: must be a list, got {type(block_tasks).__name__}")
+            if "rescue" in task:
+                # Don't inline; the main converter loop handles block+rescue
+                # so it can wire the failure -> rescue routing. The inherited
+                # when:/notify: have to be pushed into the block & rescue
+                # subtrees here so the surrounding logic doesn't lose them.
+                rescue_tasks = task["rescue"]
+                if not isinstance(rescue_tasks, list):
+                    raise ValueError(
+                        f"rescue: must be a list, got {type(rescue_tasks).__name__}"
+                    )
+                # Inline outer when/notify into each block & rescue task so
+                # the surrounding pipeline doesn't need to track inheritance.
+                # A new task dict is constructed with the inherited fields
+                # AND-joined / unioned with whatever each inner task already has.
+                preserved = {
+                    "block": _flatten_tasks(
+                        block_tasks,
+                        base_dir=base_dir,
+                        inherited_when=combined_when,
+                        inherited_notify=combined_notify,
+                        depth=depth + 1,
+                    ),
+                    "rescue": _flatten_tasks(
+                        rescue_tasks,
+                        base_dir=base_dir,
+                        inherited_when=combined_when,
+                        inherited_notify=combined_notify,
+                        depth=depth + 1,
+                    ),
+                }
+                if task.get("name"):
+                    preserved["name"] = task["name"]
+                flat.append(preserved)
+                continue
             flat.extend(
                 _flatten_tasks(
                     block_tasks,
@@ -519,6 +555,31 @@ def _build_loop_advance(
 _SET_FACT_MODULES: frozenset[str] = frozenset({"set_fact", "ansible.builtin.set_fact"})
 
 
+def _build_clear_failure_action(*, py_name: str) -> Any:
+    """Build a pure-Python action that resets the failure sentinels.
+
+    Inserted between a successfully-completed ``rescue:`` chain and the
+    downstream tasks following the block. Ansible treats a successful
+    rescue as "the failure was handled," so ``_last_failed`` and the
+    associated diagnostic sentinels reset to their healthy values before
+    later transitions can read them. Without this, a downstream
+    ``failed_when:`` or default-escalate routing would re-trigger on a
+    stale failure.
+    """
+    writes = ["_last_failed", "_last_msg", "_last_unreachable", "_last_failure_kind"]
+
+    def _impl(state: State) -> State:
+        return state.update(
+            _last_failed=False,
+            _last_msg="",
+            _last_unreachable=False,
+            _last_failure_kind="ok",
+        )
+
+    _impl.__name__ = py_name
+    return action(reads=[], writes=writes)(_impl)
+
+
 def _build_set_fact_action(
     *,
     py_name: str,
@@ -733,9 +794,103 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
     # Index tracking for emitting loop back-edges during the transition pass.
     # Maps the loop-task's py_name -> (init_py_name, advance_py_name, done_state_key).
     loop_back_edges: dict[str, tuple[str, str, str]] = {}
+    # Per-task block routing context, populated when a leaf is part of a
+    # block + rescue group. Maps py_name -> (rescue_first, clear_action, is_last)
+    # for block tasks. Rescue tasks and the clear action do not need
+    # overrides because their standard escalate / next-seq behavior is
+    # exactly what Ansible's semantics ask for. The transition builder
+    # consults this dict to emit the block_task -> rescue_first transition
+    # on failure and the block_last -> clear_action transition on success.
+    block_ctxs: dict[str, tuple[str, str, bool]] = {}
 
     for idx, task in enumerate(leaf_tasks):
         raw_name = task.get("name") or f"task_{idx + 1}"
+
+        # block + rescue (no always for v0.0.10) is lowered into a flat
+        # sequence: [block_task_1, ..., block_last, rescue_first, ...,
+        # rescue_last, clear_action]. Failure in any block task routes to
+        # rescue_first; rescue_last falls through to clear_action by default;
+        # clear_action wipes the failure sentinels so downstream tasks don't
+        # see a stale failure. The override logic for block-on-success
+        # (skipping past the rescue chain) lives in the transition builder.
+        if "block" in task:
+            block_inner = task["block"]
+            rescue_inner = task["rescue"]
+            block_leaves = _flatten_tasks(block_inner, base_dir=base_dir)
+            rescue_leaves = _flatten_tasks(rescue_inner, base_dir=base_dir)
+            if not block_leaves:
+                raise ValueError("block: must contain at least one task")
+            if not rescue_leaves:
+                raise ValueError("rescue: must contain at least one task")
+            if any("block" in leaf for leaf in block_leaves + rescue_leaves):
+                raise UnsupportedPlaybookConstruct(
+                    "nested block + rescue is not yet supported; "
+                    "v0.0.10 only handles a single non-nested block + rescue"
+                )
+
+            # Pre-allocate py_names for everything so block tasks can carry
+            # the rescue_first reference forward.
+            block_py_names: list[str] = []
+            for b_idx, btask in enumerate(block_leaves):
+                b_raw = btask.get("name") or f"block_task_{b_idx + 1}"
+                block_py_names.append(_unique(_slugify(b_raw)))
+            rescue_py_names: list[str] = []
+            for r_idx, rtask in enumerate(rescue_leaves):
+                r_raw = rtask.get("name") or f"rescue_task_{r_idx + 1}"
+                rescue_py_names.append(_unique(_slugify(r_raw)))
+            clear_py_name = _unique("_block_clear_failure")
+            rescue_first = rescue_py_names[0]
+
+            def _record_inner(py: str, t: dict[str, Any]) -> None:
+                """Record a single block/rescue inner task. v0.0.10 supports
+                module tasks and ``set_fact:``. ``notify:``, ``loop:``, and
+                ``changed_when:`` inside a block/rescue are not yet lowered
+                (those features still work outside block/rescue)."""
+                if any(k in t for k in ("loop", "with_items", "notify", "changed_when")):
+                    raise UnsupportedPlaybookConstruct(
+                        "loop:/with_items:/notify:/changed_when: inside block: "
+                        "or rescue: are not yet supported (planned for v0.0.11); "
+                        f"task: {t.get('name', '<unnamed>')!r}"
+                    )
+                module, args = _module_from_task(t)
+                register = t.get("register")
+                become = bool(t.get("become", play_become))
+                when = t.get("when")
+                fw = t.get("failed_when")
+                if module in _SET_FACT_MODULES:
+                    _record(
+                        py_name=py,
+                        when_clause=_when_to_expr_string(when) if when is not None else None,
+                        failed_when_clause=None,
+                        ignore_errors=True,
+                        register=None,
+                        meta=("set_fact", args),
+                    )
+                    return
+                _record(
+                    py_name=py,
+                    when_clause=_when_to_expr_string(when) if when is not None else None,
+                    failed_when_clause=_when_to_expr_string(fw) if fw is not None else None,
+                    ignore_errors=bool(t.get("ignore_errors", False)),
+                    register=register,
+                    meta=("module", module, args, register, become),
+                )
+
+            for b_idx, (py, btask) in enumerate(zip(block_py_names, block_leaves, strict=True)):
+                is_last_block = b_idx == len(block_py_names) - 1
+                block_ctxs[py] = (rescue_first, clear_py_name, is_last_block)
+                _record_inner(py, btask)
+            for py, rtask in zip(rescue_py_names, rescue_leaves, strict=True):
+                _record_inner(py, rtask)
+            _record(
+                py_name=clear_py_name,
+                when_clause=None,
+                failed_when_clause=None,
+                ignore_errors=True,
+                register=None,
+                meta=("clear_failure",),
+            )
+            continue
 
         # ``loop:`` / ``with_items:`` lower to a three-action sub-FSM:
         # init -> task -> advance, with a back-edge from advance to task
@@ -965,6 +1120,8 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
                 expression=cw_expr,
                 known_registers=known_registers,
             )
+        elif kind == "clear_failure":
+            actions[candidate] = _build_clear_failure_action(py_name=candidate)
         else:
             raise AssertionError(f"unknown task meta kind: {kind}")
 
@@ -1029,12 +1186,30 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
     for i, current in enumerate(py_names):
         nxt = py_names[i + 1] if i + 1 < len(py_names) else "done"
 
+        # block + rescue: a failing block task must route to the rescue
+        # chain, not to escalate. The block_ctx tag identifies these
+        # positions; the rescue chain itself uses default escalate routing
+        # (a failing rescue task IS a real escalation).
+        block_ctx = block_ctxs.get(current)
+        if block_ctx is not None:
+            rescue_first_target, clear_action_target, is_block_last_flag = block_ctx
+            is_block_task = True
+            is_block_last = is_block_last_flag
+        else:
+            rescue_first_target = None
+            clear_action_target = None
+            is_block_task = False
+            is_block_last = False
+
         # Failure routing for the current task: if the failed_when expression
         # is satisfied (or _last_failed if none was given) and ignore_errors
-        # was not set, the FSM routes to the escalate terminal.
+        # was not set, the FSM routes to the escalate terminal, except for
+        # block tasks under a rescue clause, where it routes to the rescue
+        # chain's entry instead.
         if not ignore_errors_flags[i]:
             failure_predicate = failed_when_clauses[i] or "_last_failed"
-            transitions.append((current, "escalate", expr(failure_predicate)))
+            failure_target = rescue_first_target if is_block_task else "escalate"
+            transitions.append((current, failure_target, expr(failure_predicate)))
 
         # ``when:`` skip behavior with chained skip. For each k>=1, if the
         # next k tasks ALL carry a ``when:`` that evaluates false, jump
@@ -1064,7 +1239,13 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
             _init_py, task_py, done_key = loop_back_edges[current]
             transitions.append((current, task_py, expr(f"not {done_key}")))
 
-        transitions.append((current, nxt))
+        # block_last success: skip past the rescue chain to the clear action.
+        # The standard next-seq for block_last would route into rescue_first,
+        # which is correct only on failure.
+        if is_block_last:
+            transitions.append((current, clear_action_target))
+        else:
+            transitions.append((current, nxt))
 
     # ------------------------------------------------------------------
     # Build the Application.

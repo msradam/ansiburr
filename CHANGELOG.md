@@ -6,6 +6,45 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.10] - 2026-05-21
+
+### Added
+
+- Converter: ``block: + rescue:`` round-trip. Block tasks route to the
+  rescue chain on failure (rather than to ``escalate``); the
+  rescue chain runs with normal escalate routing for its own failures;
+  after the rescue chain completes successfully, a synthesized
+  ``_block_clear_failure`` action wipes ``_last_failed``, ``_last_msg``,
+  ``_last_unreachable``, and ``_last_failure_kind`` so downstream tasks
+  do not see stale failure state.
+- The lowering matches Ansible's semantics: a deliberate
+  ``ansible.builtin.fail`` inside ``block:`` is "rescued" by the
+  ``rescue:`` chain, and post-block tasks run normally afterward.
+  Aligns conceptually with the STRATUS Transactional No-Regression
+  property (NeurIPS 2025, arXiv:2506.02009).
+- Block-inner ``set_fact:`` works (e.g. ``set_fact: rescued: true`` in a
+  rescue task to record that recovery ran).
+
+### Still rejected
+
+- ``always:`` clauses still raise ``UnsupportedPlaybookConstruct``
+  (planned for v0.0.11; the deferred-failure semantics need a different
+  lowering than rescue).
+- Nested ``block + rescue`` raises ``UnsupportedPlaybookConstruct``.
+- ``loop:`` / ``with_items:``, ``notify:``, ``changed_when:`` inside a
+  block or rescue raise. These features all work outside block/rescue;
+  combining them is planned for v0.0.11.
+
+### Tests
+
+- New positive test exercises a 3-task block whose middle task
+  deliberately fails, a rescue chain that sets ``rescued=True``, and a
+  post-block task that runs cleanly because the failure sentinels were
+  cleared.
+- ``test_unsupported_block_raises`` renamed to
+  ``test_block_with_always_still_raises`` and the fixture updated to
+  use ``always:`` (rescue is now supported).
+
 ## [0.0.9] - 2026-05-21
 
 ### Added
@@ -296,4 +335,5 @@ Initial alpha release.
 [0.0.7]: https://github.com/msradam/ansiburr/releases/tag/v0.0.7
 [0.0.8]: https://github.com/msradam/ansiburr/releases/tag/v0.0.8
 [0.0.9]: https://github.com/msradam/ansiburr/releases/tag/v0.0.9
-[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.9...HEAD
+[0.0.10]: https://github.com/msradam/ansiburr/releases/tag/v0.0.10
+[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.10...HEAD
