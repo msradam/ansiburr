@@ -114,12 +114,28 @@ def test_block_plus_rescue_runs_rescue_on_block_failure() -> None:
     assert final["post_probe"]["ping"] == "pong"
 
 
-def test_jinja_templated_loop_still_raises() -> None:
-    """Literal-list ``loop:`` is supported. A Jinja-templated value
-    (``loop: \"{{ users }}\"``) is not yet, because resolving it needs
-    runtime variable evaluation we don't implement."""
-    with pytest.raises(ansiburr.UnsupportedPlaybookConstruct, match="loop"):
-        ansiburr.from_playbook(FIXTURES / "playbook_unsupported_loop.yml")
+def test_templated_loop_reads_list_from_state() -> None:
+    """A ``loop: "{{ targets }}"`` with ``targets`` defined in play-level
+    vars: iterates the actual list at runtime (three iterations here)."""
+    app = ansiburr.from_playbook(FIXTURES / "playbook_templated_loop.yml")
+    last, _, final = app.run(halt_after=["done", "escalate"])
+    assert last.name == "done"
+    assert final["_loop_log_each_target_items"] == ["alpha", "bravo", "charlie"]
+    assert final["_loop_log_each_target_idx"] == 3
+    assert final["_loop_log_each_target_done"] is True
+
+
+def test_jinja_templated_loop_resolves_at_runtime() -> None:
+    """A ``loop:`` with a Jinja-templated value (``loop: "{{ users }}"``)
+    resolves the template against current state at the loop_init step.
+    Empty results are handled: done flips to True immediately."""
+    app = ansiburr.from_playbook(FIXTURES / "playbook_unsupported_loop.yml")
+    last, _, final = app.run(halt_after=["done", "escalate"])
+    # The play has no ``users_from_inventory`` defined, so Jinja renders
+    # empty; the loop fires zero iterations and the FSM still reaches done.
+    assert last.name == "done"
+    assert final["_loop_dynamic_loop_items"] == []
+    assert final["_loop_dynamic_loop_done"] is True
 
 
 def test_gather_facts_projects_ansible_facts_into_state() -> None:

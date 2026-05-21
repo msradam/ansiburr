@@ -551,18 +551,19 @@ def _build_task_action(
     return module_action(module, register=register, become=become)(_impl)
 
 
-def _loop_items_from_task(task: Mapping[str, Any]) -> list[Any]:
-    """Extract a literal-list ``loop:`` / ``with_items:`` value from a task,
-    or raise :class:`UnsupportedPlaybookConstruct` if the value is
-    Jinja-templated, a non-list scalar, or otherwise dynamic."""
+def _loop_items_from_task(task: Mapping[str, Any]) -> list[Any] | str:
+    """Extract a ``loop:`` / ``with_items:`` value from a task. A literal
+    list returns the list; a string (Jinja-templated reference like
+    ``loop: "{{ docker_users }}"``) returns the template unchanged so the
+    loop_init action can resolve it against state at task time."""
     raw = task.get("loop") if "loop" in task else task.get("with_items")
     if isinstance(raw, str):
-        raise UnsupportedPlaybookConstruct(
-            "loop:/with_items: with a Jinja-templated or string value is not "
-            f"supported (got {raw!r}); only literal lists are lowered"
-        )
+        return raw
     if not isinstance(raw, list):
-        raise ValueError(f"loop:/with_items: must be a list, got {type(raw).__name__}")
+        raise ValueError(
+            "loop:/with_items: must be a list or template string, "
+            f"got {type(raw).__name__}"
+        )
     return list(raw)
 
 
@@ -573,22 +574,55 @@ def _build_loop_init(
     item_state_key: str,
     idx_state_key: str,
     done_state_key: str,
-    items: list[Any],
+    items_or_template: list[Any] | str,
+    play_vars: Mapping[str, Any] | None = None,
 ) -> Any:
     """Build the pure-Python action that seeds the loop's iteration state.
 
-    Writes the literal item list, the current-item field (set to ``items[0]``),
-    the index counter (0), and a done flag (False unless items is empty)."""
+    ``items_or_template`` is either a literal list (set once at conversion
+    time) or a Jinja template string like ``"{{ docker_users }}"`` (resolved
+    against current state at task time). For the template form, the result
+    is parsed: a Python list returns directly; a string is ``ast.literal_eval``-ed
+    or split into a single-element list as a last resort. Empty lists are
+    valid; the done flag is set to True immediately."""
+    import ast
+
     writes = [items_state_key, item_state_key, idx_state_key, done_state_key]
-    empty = not items
+    pinned_vars = dict(play_vars or {})
+
+    def _resolve_items(state: State) -> list[Any]:
+        if isinstance(items_or_template, list):
+            return list(items_or_template)
+        context: dict[str, Any] = {**pinned_vars}
+        for key, value in state.get_all().items():
+            if key.startswith("_"):
+                continue
+            context.setdefault(key, value)
+        rendered = _render_jinja(items_or_template, context)
+        if isinstance(rendered, list):
+            return list(rendered)
+        if isinstance(rendered, str):
+            text = rendered.strip()
+            if not text:
+                return []
+            try:
+                parsed = ast.literal_eval(text)
+            except (ValueError, SyntaxError):
+                # Not a Python literal; treat as a single string item.
+                return [text]
+            if isinstance(parsed, list):
+                return parsed
+            return [parsed]
+        return [rendered]
 
     def _impl(state: State) -> State:
+        resolved = _resolve_items(state)
         return state.update(
             **{
-                items_state_key: list(items),
-                item_state_key: items[0] if not empty else None,
+                items_state_key: list(resolved),
+                item_state_key: resolved[0] if resolved else None,
                 idx_state_key: 0,
-                done_state_key: empty,
+                done_state_key: not resolved,
             }
         )
 
@@ -631,6 +665,89 @@ _SET_FACT_MODULES: frozenset[str] = frozenset({"set_fact", "ansible.builtin.set_
 _INCLUDE_VARS_MODULES: frozenset[str] = frozenset(
     {"include_vars", "ansible.builtin.include_vars"}
 )
+
+
+def _build_first_found_include_vars_action(
+    *,
+    py_name: str,
+    base_dir: Path,
+    params: Mapping[str, Any],
+    task_vars: Mapping[str, Any],
+    declared_writes: list[str],
+) -> Any:
+    """Build an action that resolves ``include_vars: "{{ lookup('first_found', params) }}"``
+    at task execution time.
+
+    ``params`` is the dict the playbook author defined for the lookup,
+    typically a ``files:`` list and a ``paths:`` list. The dict's values
+    contain Jinja templates referencing ``ansible_facts.*`` and other state.
+    At task time, each file name is rendered against play vars + current
+    state + task-level vars; each ``paths`` entry is prepended in turn;
+    the first existing file is loaded and its top-level keys land in state.
+
+    ``declared_writes`` is the union of top-level keys across every YAML
+    file currently present under the ``paths`` directories, scanned at
+    conversion time so Burr knows up front what state fields this action
+    may touch.
+
+    Mirrors the dominant ``geerlingguy.*`` pattern: per-OS vars files
+    selected via ``ansible_facts.distribution`` / ``ansible_facts.os_family``.
+    """
+    pinned_task_vars = dict(task_vars)
+    pinned_params = dict(params)
+
+    def _impl(state: State) -> State:
+        # Build the Jinja context: play vars + non-internal state + task vars.
+        context: dict[str, Any] = {**pinned_task_vars}
+        for key, value in state.get_all().items():
+            if key.startswith("_"):
+                continue
+            context.setdefault(key, value)
+        rendered = _render_jinja(dict(pinned_params), context)
+        files = rendered.get("files", [])
+        paths = rendered.get("paths") or ["."]
+        if not isinstance(files, list) or not isinstance(paths, list):
+            raise ValueError(
+                "first_found: params.files and params.paths must be lists; "
+                f"got {type(files).__name__} / {type(paths).__name__}"
+            )
+        for path_prefix in paths:
+            for filename in files:
+                candidate = base_dir / str(path_prefix) / str(filename)
+                if candidate.exists():
+                    with candidate.open() as fh:
+                        loaded = yaml.safe_load(fh) or {}
+                    if not isinstance(loaded, Mapping):
+                        raise ValueError(
+                            f"include_vars: {candidate} top-level must be a mapping"
+                        )
+                    return state.update(**dict(loaded))
+        raise FileNotFoundError(
+            f"first_found: none of {files} found in {paths} under {base_dir}"
+        )
+
+    _impl.__name__ = py_name
+    return action(reads=[], writes=declared_writes)(_impl)
+
+
+def _scan_yaml_keys_in_paths(base_dir: Path, paths: list[str]) -> list[str]:
+    """Scan every ``*.yml`` / ``*.yaml`` file under the given path prefixes
+    and return the union of their top-level keys. Used to pre-declare the
+    write set for a ``first_found`` include_vars action whose actual file
+    is only resolvable at task time."""
+    out: set[str] = set()
+    for path_prefix in paths:
+        scan_dir = base_dir / path_prefix
+        if not scan_dir.is_dir():
+            continue
+        for f in list(scan_dir.glob("*.yml")) + list(scan_dir.glob("*.yaml")):
+            try:
+                loaded = yaml.safe_load(f.read_text()) or {}
+            except yaml.YAMLError:
+                continue
+            if isinstance(loaded, Mapping):
+                out.update(str(k) for k in loaded)
+    return sorted(out)
 
 
 def _build_include_vars_action(
@@ -1366,10 +1483,11 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
                 meta=("set_fact", args),
             )
         elif module in _INCLUDE_VARS_MODULES:
-            # ``include_vars: file: path`` (or short form ``include_vars: path``).
-            # Resolve the path relative to the playbook's base_dir; refuse
-            # Jinja-templated paths and lookup() expressions because they
-            # need runtime evaluation we don't implement.
+            # ``include_vars: file: path`` (or short form ``include_vars: path``)
+            # is the simple case. The geerlingguy-style
+            # ``include_vars: "{{ lookup('first_found', params) }}"`` with
+            # task-level ``vars: { params: {...} }`` lowers via the
+            # first_found resolver action below.
             file_value: Any
             namespace_value: str | None
             if isinstance(args, Mapping):
@@ -1380,25 +1498,75 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
                 namespace_value = None
             if not isinstance(file_value, str):
                 raise UnsupportedPlaybookConstruct(
-                    "include_vars: only the simple ``file: path`` form is supported; "
+                    "include_vars: only the simple ``file: path`` form and the "
+                    "``lookup('first_found', params)`` form are supported; "
                     f"got {file_value!r}"
                 )
-            if "{{" in file_value or "lookup(" in file_value:
-                raise UnsupportedPlaybookConstruct(
-                    "include_vars: Jinja templates and lookup() expressions in "
-                    f"the path are not supported (got {file_value!r})"
+            # first_found path: the include_vars value is a Jinja template
+            # whose only function call is ``lookup('first_found', <name>)``.
+            # The named param dict comes from the task's ``vars:`` block.
+            if "lookup(" in file_value and "first_found" in file_value:
+                task_vars = task.get("vars") or {}
+                if not isinstance(task_vars, Mapping):
+                    raise ValueError(
+                        f"task vars: must be a mapping; got {type(task_vars).__name__}"
+                    )
+                # Extract the param name being looked up. Accept simple
+                # ``lookup('first_found', params)`` or single-arg variants;
+                # complex multi-argument lookups raise.
+                param_name = None
+                for candidate_name in task_vars:
+                    if f"'{candidate_name}'" in file_value or f", {candidate_name}" in file_value:
+                        param_name = candidate_name
+                        break
+                if param_name is None or not isinstance(task_vars.get(param_name), Mapping):
+                    raise UnsupportedPlaybookConstruct(
+                        "first_found: expected a task ``vars:`` entry naming a "
+                        "dict with files: and paths: keys"
+                    )
+                params_dict = dict(task_vars[param_name])
+                # Scan the candidate paths at convert time to declare the
+                # write set Burr expects up front.
+                resolved_paths_lit = params_dict.get("paths") or ["."]
+                if not isinstance(resolved_paths_lit, list):
+                    raise ValueError("first_found: params.paths must be a list")
+                declared_writes = _scan_yaml_keys_in_paths(
+                    base_dir, [str(p) for p in resolved_paths_lit]
                 )
-            vars_path = (base_dir / file_value).resolve()
-            if not vars_path.exists():
-                raise FileNotFoundError(f"include_vars: file not found: {vars_path}")
-            _record(
-                py_name=py,
-                when_clause=_when_to_expr_string(when) if when is not None else None,
-                failed_when_clause=None,
-                ignore_errors=True,
-                register=None,
-                meta=("include_vars", vars_path, namespace_value),
-            )
+                _record(
+                    py_name=py,
+                    when_clause=_when_to_expr_string(when) if when is not None else None,
+                    failed_when_clause=None,
+                    ignore_errors=True,
+                    register=None,
+                    meta=(
+                        "include_vars_first_found",
+                        base_dir,
+                        params_dict,
+                        dict(task_vars),
+                        declared_writes,
+                    ),
+                )
+            else:
+                if "{{" in file_value or "lookup(" in file_value:
+                    raise UnsupportedPlaybookConstruct(
+                        "include_vars: only literal paths and the "
+                        "``lookup('first_found', params)`` form are supported; "
+                        f"got {file_value!r}"
+                    )
+                vars_path = (base_dir / file_value).resolve()
+                if not vars_path.exists():
+                    raise FileNotFoundError(
+                        f"include_vars: file not found: {vars_path}"
+                    )
+                _record(
+                    py_name=py,
+                    when_clause=_when_to_expr_string(when) if when is not None else None,
+                    failed_when_clause=None,
+                    ignore_errors=True,
+                    register=None,
+                    meta=("include_vars", vars_path, namespace_value),
+                )
         else:
             _record(
                 py_name=py,
@@ -1518,7 +1686,8 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
                 item_state_key=item_key,
                 idx_state_key=idx_key,
                 done_state_key=done_key,
-                items=items,
+                items_or_template=items,
+                play_vars=play_vars,
             )
         elif kind == "loop_advance":
             _, items_key, item_key, idx_key, done_key = meta
@@ -1560,6 +1729,15 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
             _, vars_path, namespace_value = meta
             actions[candidate] = _build_include_vars_action(
                 py_name=candidate, file_path=vars_path, namespace=namespace_value
+            )
+        elif kind == "include_vars_first_found":
+            _, base, params_dict, task_vars_dict, declared = meta
+            actions[candidate] = _build_first_found_include_vars_action(
+                py_name=candidate,
+                base_dir=base,
+                params=params_dict,
+                task_vars=task_vars_dict,
+                declared_writes=declared,
             )
         else:
             raise AssertionError(f"unknown task meta kind: {kind}")

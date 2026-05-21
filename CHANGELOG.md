@@ -6,6 +6,40 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.16] - 2026-05-21
+
+The combination of changes in this release is what lets the converter
+actually ingest a real published geerlingguy role end-to-end. Tested
+against ``geerlingguy.ansible-role-docker`` (Galaxy's most-downloaded
+container role): converts cleanly into a 63-action Burr Application.
+
+### Added
+
+- Converter: ``loop:`` and ``with_items:`` accept Jinja templates
+  (``loop: "{{ docker_users }}"``) in addition to literal lists. The
+  template is resolved against current state at the loop_init step;
+  the rendered result is parsed as a Python list (or ``ast.literal_eval``-ed
+  when Jinja returns a string repr). Empty lists are valid; the done
+  flag flips to True immediately.
+- Converter: ``include_vars: "{{ lookup('first_found', params) }}"``
+  with a task-level ``vars:`` block defining ``params``. The action
+  built for this case resolves the params dict (files + paths) against
+  state at task time and loads the first existing YAML file. Pre-scans
+  every YAML under the paths dirs at conversion time to declare the
+  write set Burr requires up front. This is the dominant geerlingguy
+  pattern for OS-conditional vars file selection.
+- Converter: task-level ``vars:`` blocks are now made available in the
+  Jinja context for the task they're attached to (currently only the
+  first_found resolver consumes them; the wiring opens the door to
+  broader task-vars support later).
+
+### Tests
+
+- Two new positive tests: a templated loop reading from play-level
+  vars iterates correctly; an empty templated loop completes
+  immediately. The negative ``test_jinja_templated_loop_still_raises``
+  was repurposed.
+
 ## [0.0.15] - 2026-05-21
 
 ### Added
@@ -472,4 +506,5 @@ Initial alpha release.
 [0.0.13]: https://github.com/msradam/ansiburr/releases/tag/v0.0.13
 [0.0.14]: https://github.com/msradam/ansiburr/releases/tag/v0.0.14
 [0.0.15]: https://github.com/msradam/ansiburr/releases/tag/v0.0.15
-[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.15...HEAD
+[0.0.16]: https://github.com/msradam/ansiburr/releases/tag/v0.0.16
+[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.16...HEAD
