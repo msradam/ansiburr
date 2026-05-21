@@ -86,7 +86,19 @@ Working examples of each are in [`examples/`](./examples/).
 
 ## From an existing playbook
 
-If you already have an Ansible playbook, `from_playbook(...)` lifts it into a runnable Burr `Application` without rewriting the YAML. The full demo lives in [`examples/from_playbook/`](./examples/from_playbook/); here's the shape:
+If you already have an Ansible playbook, `from_playbook(...)` lifts it into a runnable Burr `Application` without rewriting the YAML. The full demo lives in [`examples/from_playbook/`](./examples/from_playbook/).
+
+For a sense of how much of the wild ansiburr ingests: five of the six most-downloaded `geerlingguy` roles (the de facto Galaxy benchmark) convert directly from their unmodified published source. ansible-role-php blocks on a Jinja filter expression inside a `when:` clause, not on any structural converter limitation.
+
+| Galaxy role | Converted graph |
+|---|---|
+| `geerlingguy.ansible-role-docker` | 63 actions, 205 transitions |
+| `geerlingguy.ansible-role-mysql` | 78 actions, 265 transitions |
+| `geerlingguy.ansible-role-nginx` | 40 actions, 153 transitions |
+| `geerlingguy.ansible-role-postgresql` | 63 actions, 186 transitions |
+| `geerlingguy.ansible-role-redis` | 13 actions, 27 transitions |
+
+Here's the smaller demo playbook from `examples/from_playbook/`:
 
 ```yaml
 # playbook.yml

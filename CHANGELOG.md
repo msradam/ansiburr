@@ -6,6 +6,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.20] - 2026-05-21
+
+### Documented
+
+- README "From an existing playbook" section now carries the geerling
+  conversion table on the front page. 5/6 of the most-downloaded
+  geerlingguy roles convert from their unmodified published source.
+  Visible on the PyPI project page from this release onward.
+
 ## [0.0.19] - 2026-05-21
 
 ### Added
@@ -592,4 +601,5 @@ Initial alpha release.
 [0.0.17]: https://github.com/msradam/ansiburr/releases/tag/v0.0.17
 [0.0.18]: https://github.com/msradam/ansiburr/releases/tag/v0.0.18
 [0.0.19]: https://github.com/msradam/ansiburr/releases/tag/v0.0.19
-[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.19...HEAD
+[0.0.20]: https://github.com/msradam/ansiburr/releases/tag/v0.0.20
+[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.20...HEAD
