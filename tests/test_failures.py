@@ -195,6 +195,36 @@ def test_check_mode_does_not_mutate() -> None:
         assert final["_last_diff"] is not None  # diff was captured
 
 
+def test_module_action_timeout_terminates_subprocess() -> None:
+    """A module that would otherwise run for 30s must be killed within a few
+    seconds when ``timeout=2`` is set. Without the cap, ansible-playbook
+    would hang the FSM indefinitely on a slow or unresponsive target."""
+    import time
+
+    @ansiburr.module_action("ansible.builtin.shell", timeout=2)
+    def hang(state):
+        return {"cmd": "sleep 30"}
+
+    @action(reads=["_last_failed", "_last_msg"], writes=["outcome"])
+    def report(state):
+        return state.update(outcome=f"failed={state['_last_failed']}")
+
+    app = (
+        ApplicationBuilder()
+        .with_actions(hang=hang, report=report)
+        .with_transitions(("hang", "report"))
+        .with_state(**ansiburr.initial_sentinels(), outcome="")
+        .with_entrypoint("hang")
+        .build()
+    )
+    start = time.monotonic()
+    _, _, final = app.run(halt_after=["report"])
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 10, f"timeout did not fire: ran for {elapsed:.1f}s"
+    assert final["_last_failed"] is True
+
+
 def test_bad_module_args_fails_cleanly() -> None:
     """An invalid argument to a real module must surface as _last_failed=True
     with a useful _last_msg, not raise."""

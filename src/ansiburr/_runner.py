@@ -1,8 +1,21 @@
-"""Thin wrapper around ansible-runner that invokes a single module and returns its result."""
+"""Thin wrapper around ansible-runner that invokes a single module and returns its result.
+
+Concurrency: a single ``Application``'s actions execute serially; this module is
+written to that assumption. Multiple ``run_module`` calls running concurrently
+against the same target host can collide on the shared SSH ``ControlPath`` socket
+and produce undefined behavior. Multi-host fan-out via parallel Applications is
+fine; parallel Applications against the same host is not.
+
+Debugging: set ``ANSIBURR_DEBUG=1`` in the environment to disable ansible-runner's
+quiet mode. The full ansible-playbook stdout/stderr will then appear on the
+caller's stdout, which is the only signal when ansible-playbook fails in a way
+that doesn't make it into the event stream.
+"""
 
 from __future__ import annotations
 
 import os
+import signal
 import sys
 import tempfile
 from collections.abc import Mapping
@@ -34,12 +47,21 @@ _DEFAULT_ENVVARS: dict[str, str] = {
     "ANSIBLE_SSH_ARGS": _DEFAULT_SSH_ARGS,
 }
 
+# Default per-module timeout (seconds). Five minutes covers most realistic
+# Ansible modules; long-running ones (package installs, image pulls) can
+# override per-action via ``module_action(..., timeout=N)``.
+_DEFAULT_TIMEOUT_S: float = 300.0
+
 
 def _ensure_control_dir() -> None:
     """``~/.ssh/.ansiburr-cm/`` needs to exist before OpenSSH writes a socket
     into it. Mode 0700 so other users can't hijack the multiplexed sessions."""
     _ANSIBURR_CONTROL_DIR.mkdir(parents=True, exist_ok=True)
     os.chmod(_ANSIBURR_CONTROL_DIR, 0o700)
+
+
+def _debug_enabled() -> bool:
+    return os.environ.get("ANSIBURR_DEBUG", "").lower() in ("1", "true", "yes")
 
 
 def run_module(
@@ -51,6 +73,7 @@ def run_module(
     become: bool = False,
     check_mode: bool = False,
     diff: bool = False,
+    timeout: float | None = _DEFAULT_TIMEOUT_S,
 ) -> dict[str, Any]:
     """Run an Ansible module against a host and return its result dict.
 
@@ -65,6 +88,17 @@ def run_module(
     ``diff=True`` to also capture structured before/after content under the
     result's ``diff`` key. Together they implement the plan-before-apply
     pattern.
+
+    ``timeout`` is the maximum number of seconds ansible-playbook may run for
+    a single module invocation; on overrun the subprocess is killed and the
+    returned dict carries ``failed=True`` plus a diagnostic ``msg``. Default
+    is five minutes. ``None`` disables the timeout entirely.
+
+    Pressing Ctrl-C during a long-running call asks ansible-runner to cancel
+    the subprocess cleanly via its ``cancel_callback`` hook, then re-raises
+    ``KeyboardInterrupt``. Without this, ansible-playbook would orphan and
+    the SSH ``ControlMaster`` socket would linger for ``ControlPersist``
+    seconds.
 
     The result always includes Ansible's diagnostic fields on failure
     (``failed``, ``msg``, optionally ``unreachable``) so callers can branch
@@ -109,19 +143,58 @@ def run_module(
         (project_dir / "playbook.yml").write_text(yaml.safe_dump(play))
 
         _ensure_control_dir()
+
+        # Track Ctrl-C via a closure that ansible-runner can poll. Restore the
+        # previous SIGINT handler on the way out. ``signal.signal`` only works
+        # in the main thread; from any other thread the install raises
+        # ``ValueError`` and we fall through to no-cancel-support, which is
+        # an acceptable degradation.
+        cancelled = {"flag": False}
+
+        def _on_sigint(signum: int, frame: Any) -> None:
+            cancelled["flag"] = True
+
+        previous_handler: Any = None
+        try:
+            previous_handler = signal.signal(signal.SIGINT, _on_sigint)
+        except ValueError:
+            previous_handler = None
+
         runner_kwargs: dict[str, Any] = {
             "private_data_dir": str(tmp_path),
             "playbook": "playbook.yml",
-            "quiet": True,
+            "quiet": not _debug_enabled(),
             "envvars": _DEFAULT_ENVVARS,
+            "cancel_callback": lambda: cancelled["flag"],
         }
+        if timeout is not None:
+            runner_kwargs["timeout"] = timeout
         if diff:
             # ansible-runner forwards --diff via the cmdline flag rather than via
             # the play structure; the task-level ``diff: true`` covers the play
             # side but the runner also needs to pass --diff for the cli switch.
             runner_kwargs["cmdline"] = "--diff"
-        runner = ansible_runner.run(**runner_kwargs)
-        return _extract_result(runner)
+
+        try:
+            runner = ansible_runner.run(**runner_kwargs)
+        finally:
+            if previous_handler is not None:
+                signal.signal(signal.SIGINT, previous_handler)
+
+        if cancelled["flag"]:
+            # ansible-runner returned because the cancel_callback fired. Re-raise
+            # the interrupt so the caller's stack unwinds normally instead of
+            # leaving the FSM thinking the module returned a result.
+            raise KeyboardInterrupt
+
+        result = _extract_result(runner)
+        if runner.status == "timeout" and "failed" not in result:
+            result["failed"] = True
+            result.setdefault(
+                "msg",
+                f"ansible-playbook exceeded timeout of {timeout}s and was terminated",
+            )
+        return result
 
 
 def _extract_result(runner: Any) -> dict[str, Any]:

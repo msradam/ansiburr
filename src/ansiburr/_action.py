@@ -73,6 +73,7 @@ def module_action(
     become: bool = False,
     check_mode: bool = False,
     diff: bool = False,
+    timeout: float | None = None,
 ) -> Callable[[ModuleArgsBuilder], WrappedAction]:
     """Wrap a function so it executes an Ansible module as a Burr action.
 
@@ -99,6 +100,12 @@ def module_action(
     would change without making changes. Pair with ``diff=True`` to also
     capture structured before/after content. Useful for plan-before-apply
     patterns.
+
+    ``timeout`` is the per-call ansible-playbook timeout in seconds. When
+    ``None`` (the default), the runner's library-level default (five
+    minutes) applies. On overrun the underlying ansible-playbook subprocess
+    is killed and the action's result carries ``failed=True`` plus a
+    diagnostic ``msg``.
 
     ``connection`` is an optional dict of Ansible hostvars (``ansible_host``,
     ``ansible_port``, ``ansible_user``, ``ansible_ssh_private_key_file``,
@@ -134,14 +141,19 @@ def module_action(
                 module_args, state_overrides = user_return
             else:
                 module_args, state_overrides = user_return, {}
+            run_kwargs: dict[str, Any] = {
+                "host": host,
+                "connection": connection,
+                "become": become,
+                "check_mode": check_mode,
+                "diff": diff,
+            }
+            if timeout is not None:
+                run_kwargs["timeout"] = timeout
             result = run_module(
                 module,
                 module_args,
-                host=host,
-                connection=connection,
-                become=become,
-                check_mode=check_mode,
-                diff=diff,
+                **run_kwargs,
             )
             update: dict[str, Any] = {
                 state_key: result.get(result_key) for state_key, result_key in writes_map.items()

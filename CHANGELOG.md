@@ -6,6 +6,46 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.2] - 2026-05-21
+
+Runner hardening and a real playbook-conversion example.
+
+### Added
+
+- `run_module` and `@module_action` accept a `timeout` parameter (default
+  300 seconds). On overrun the ansible-playbook subprocess is killed and
+  the action's result carries `failed=True` with a diagnostic `msg`.
+  Threaded through `Host.module(...)` and the shorthand methods.
+- `ANSIBURR_DEBUG=1` environment variable disables ansible-runner's quiet
+  mode. The ansible-playbook stdout and stderr stream to the controller,
+  useful when a module crashes in a way the event stream does not capture.
+- SIGINT handling. Ctrl-C during a long-running module call asks
+  ansible-runner to cancel the subprocess via its `cancel_callback`,
+  then re-raises `KeyboardInterrupt`. Without this, ansible-playbook
+  would orphan and the SSH ControlMaster socket would linger.
+- The `from_playbook(...)` converter now renders Jinja2 templates inside
+  task arguments using Burr state as the context. Lets a converted
+  playbook with `msg: "{{ git_check.stdout }}"` resolve across tasks.
+  Previously each task ran as its own play and could not see prior
+  registered values.
+- `from_playbook(...)` now translates Jinja-style attribute access
+  (`when: git_check.rc == 0`) on registered names into Python bracket
+  access (`when: git_check['rc'] == 0`) so Burr's `expr()` can evaluate
+  the predicate.
+- `examples/from_playbook/`: a small playbook (`command` + `register` +
+  `ignore_errors` + `changed_when: false` + Jinja-templated debug
+  messages + `when: register.attr`) and a `run.py` that converts and
+  runs it.
+- README "From an existing playbook" section showing the inline YAML,
+  the two-line `from_playbook(...)` conversion, and sample output.
+
+### Documented
+
+- The single-Application serial execution contract. Two `@module_action`
+  calls against the same host running concurrently can collide on the
+  shared SSH ControlPath; parallel Applications across distinct hosts
+  is fine.
+
 ## [0.0.1] - 2026-05-21
 
 Initial alpha release.
@@ -59,4 +99,5 @@ Initial alpha release.
   will break installs at version-resolution time rather than at runtime.
 
 [0.0.1]: https://github.com/msradam/ansiburr/releases/tag/v0.0.1
-[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.1...HEAD
+[0.0.2]: https://github.com/msradam/ansiburr/releases/tag/v0.0.2
+[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.2...HEAD

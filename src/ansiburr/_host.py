@@ -112,6 +112,7 @@ class Host:
         become: bool | None = None,
         check_mode: bool = False,
         diff: bool = False,
+        timeout: float | None = None,
     ) -> Callable[[ModuleArgsBuilder], WrappedAction]:
         """``@module_action`` configured for this host.
 
@@ -120,6 +121,8 @@ class Host:
         run unprivileged (or vice versa). ``check_mode`` + ``diff`` enable
         plan-before-apply: the module reports what it would change without
         making changes, and the structured diff lands at ``state['_last_diff']``.
+        ``timeout`` caps the per-call ansible-playbook runtime in seconds;
+        ``None`` uses the runner default (five minutes).
         """
         return module_action(
             module,
@@ -131,6 +134,7 @@ class Host:
             become=self.become if become is None else become,
             check_mode=check_mode,
             diff=diff,
+            timeout=timeout,
         )
 
     # ---- Shorthands for commonly-used ansible.builtin modules. -----------
