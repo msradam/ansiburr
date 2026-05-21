@@ -6,6 +6,38 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.23] - 2026-05-21
+
+### Added
+
+- ``ansiburr lint <playbook>`` subcommand. Dry-runs ``from_playbook``
+  and reports a structural summary without executing anything. On
+  success, prints the action and transition counts plus a per-bucket
+  breakdown showing how many actions are module/python tasks vs
+  loop-init synthesized vs notify markers vs changed_when posts vs
+  block save/restore actions vs terminals vs handlers. On
+  ``UnsupportedPlaybookConstruct``, names the blocking construct
+  and exits 1. On any other error, prints the exception type +
+  message and exits 2.
+
+  Example against the converted geerling docker role::
+
+      $ ansiburr lint /tmp/geerling-docker.yml
+      ansiburr lint  geerling-docker.yml: OK
+        actions:     63
+        transitions: 205
+
+        breakdown:
+          module + python tasks              41
+          loop init/advance (auto)            4
+          notify markers (auto)               9
+          changed_when posts (auto)           5
+          terminals (auto)                    2
+          handlers                            2
+
+- Three new CLI tests covering the OK path, the REJECTED path, and the
+  refusal to lint Python files.
+
 ## [0.0.22] - 2026-05-21
 
 ### Changed
@@ -659,4 +691,5 @@ Initial alpha release.
 [0.0.20]: https://github.com/msradam/ansiburr/releases/tag/v0.0.20
 [0.0.21]: https://github.com/msradam/ansiburr/releases/tag/v0.0.21
 [0.0.22]: https://github.com/msradam/ansiburr/releases/tag/v0.0.22
-[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.22...HEAD
+[0.0.23]: https://github.com/msradam/ansiburr/releases/tag/v0.0.23
+[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.23...HEAD

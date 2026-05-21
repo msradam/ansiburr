@@ -120,6 +120,42 @@ def test_run_loads_python_build_application_callable(tmp_path: Path) -> None:
     assert "outcome:      x=42" in output
 
 
+def test_lint_reports_action_counts_on_success() -> None:
+    """``ansiburr lint`` should produce a structural summary for a
+    playbook that converts cleanly."""
+    code, output = _run(["lint", str(FIXTURES / "playbook_simple.yml")])
+    assert code == 0
+    assert "OK" in output
+    assert "actions:" in output
+    assert "transitions:" in output
+    assert "module + python tasks" in output
+
+
+def test_lint_reports_unsupported_construct(tmp_path: Path) -> None:
+    """``ansiburr lint`` should exit 1 and name the blocking construct
+    when the playbook hits an UnsupportedPlaybookConstruct."""
+    bad = tmp_path / "bad.yml"
+    bad.write_text(
+        "- name: bad\n"
+        "  hosts: localhost\n"
+        "  gather_facts: no\n"
+        "  roles:\n"
+        "    - some-role\n"
+    )
+    code, output = _run(["lint", str(bad)])
+    assert code == 1
+    assert "REJECTED" in output
+    assert "roles" in output
+
+
+def test_lint_refuses_python_file(tmp_path: Path) -> None:
+    """lint operates only on YAML playbooks, not Python modules."""
+    py = tmp_path / "fsm.py"
+    py.write_text("app = None\n")
+    with pytest.raises(SystemExit):
+        _run(["lint", str(py)])
+
+
 def test_run_python_file_with_neither_app_nor_builder(tmp_path: Path) -> None:
     fsm = tmp_path / "fsm.py"
     fsm.write_text("# no Application here\nVALUE = 42\n")

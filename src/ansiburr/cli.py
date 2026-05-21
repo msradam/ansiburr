@@ -4,11 +4,18 @@ Subcommands::
 
     ansiburr run    <path> [--halt-after ACTION ...]
     ansiburr graph  <path> [--format {mermaid,dot,text}]
+    ansiburr lint   <path>
 
 ``<path>`` is either an Ansible YAML playbook (converted via
 :func:`ansiburr.from_playbook`) or a Python module that builds an
 ``Application`` and exposes it as a module-level ``app`` attribute or via
 a ``build_application()`` callable.
+
+``lint`` is the dry-conversion reporter: it tries to lift the playbook
+into an Application and prints a structural summary (actions,
+transitions, what got lowered) without running anything. On failure it
+names the blocking construct so you can decide whether to rewrite or
+file an issue.
 """
 
 from __future__ import annotations
@@ -200,6 +207,84 @@ def _cmd_graph(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_lint(args: argparse.Namespace) -> int:
+    """Dry-convert a playbook and report a structural summary.
+
+    Returns 0 on a clean conversion, 1 on UnsupportedPlaybookConstruct,
+    2 on any other parse / lowering error.
+    """
+    from ansiburr import UnsupportedPlaybookConstruct, from_playbook
+
+    path = Path(args.path)
+    if not path.exists():
+        raise SystemExit(f"ansiburr: no such file: {path}")
+    suffix = path.suffix.lower()
+    if suffix not in _PLAYBOOK_SUFFIXES:
+        raise SystemExit(
+            f"ansiburr: lint expects a YAML playbook (one of "
+            f"{_PLAYBOOK_SUFFIXES}); got {path}"
+        )
+
+    try:
+        app = from_playbook(path)
+    except UnsupportedPlaybookConstruct as e:
+        print(f"ansiburr lint  {path.name}: REJECTED")
+        print(f"  reason: {e}")
+        print()
+        print("  the converter refused this playbook because of an unsupported")
+        print("  construct. options:")
+        print("    1. rewrite the construct in a form ansiburr accepts")
+        print("       (see REFERENCE.md for the supported list)")
+        print("    2. open an issue at github.com/msradam/ansiburr/issues")
+        return 1
+    except Exception as e:
+        print(f"ansiburr lint  {path.name}: ERROR")
+        print(f"  {type(e).__name__}: {e}")
+        return 2
+
+    actions = list(app.graph.actions)
+    transitions = list(app.graph.transitions)
+
+    # Bucket the action names so the report shows what got lowered into
+    # what. Each prefix corresponds to a synthesized action class added
+    # by ansiburr.
+    buckets: dict[str, list[str]] = {
+        "module + python tasks": [],
+        "loop init/advance (auto)": [],
+        "notify markers (auto)": [],
+        "changed_when posts (auto)": [],
+        "block save/restore/clear (auto)": [],
+        "terminals (auto)": [],
+        "handlers": [],
+    }
+    for a in actions:
+        n = a.name
+        if n in ("done", "escalate"):
+            buckets["terminals (auto)"].append(n)
+        elif n.startswith("handler_"):
+            buckets["handlers"].append(n)
+        elif n.startswith("_notify_"):
+            buckets["notify markers (auto)"].append(n)
+        elif n.startswith("_changed_when_"):
+            buckets["changed_when posts (auto)"].append(n)
+        elif n.startswith("_block_"):
+            buckets["block save/restore/clear (auto)"].append(n)
+        elif "_loop_init" in n or "_loop_advance" in n:
+            buckets["loop init/advance (auto)"].append(n)
+        else:
+            buckets["module + python tasks"].append(n)
+
+    print(f"ansiburr lint  {path.name}: OK")
+    print(f"  actions:     {len(actions)}")
+    print(f"  transitions: {len(transitions)}")
+    print()
+    print("  breakdown:")
+    for label, names in buckets.items():
+        if names:
+            print(f"    {label:32}  {len(names):3d}")
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -242,6 +327,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Output format. Default: mermaid.",
     )
     graph_p.set_defaults(func=_cmd_graph)
+
+    lint_p = subparsers.add_parser(
+        "lint",
+        help="Dry-convert a playbook and report a structural summary.",
+    )
+    lint_p.add_argument("path", help="Path to a .yml / .yaml playbook.")
+    lint_p.set_defaults(func=_cmd_lint)
 
     return parser
 

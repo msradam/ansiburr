@@ -5,9 +5,10 @@
 ```
 ansiburr run    <path> [--halt-after ACTION ...]
 ansiburr graph  <path> [--format {mermaid,dot,text}]
+ansiburr lint   <path>
 ```
 
-`<path>` is either a `.yml`/`.yaml` playbook (lifted via `from_playbook`) or a `.py` file that exposes either a module-level `app` Application or a `build_application()` callable. `run` halts on `done` or `escalate` by default. `graph` defaults to mermaid output.
+`<path>` is either a `.yml`/`.yaml` playbook (lifted via `from_playbook`) or a `.py` file that exposes either a module-level `app` Application or a `build_application()` callable. `run` halts on `done` or `escalate` by default. `graph` defaults to mermaid output. `lint` operates only on YAML playbooks; it dry-runs `from_playbook` and prints a structural summary (action counts, per-bucket breakdown of what got lowered) without executing anything. Exit code 0 on clean conversion, 1 on `UnsupportedPlaybookConstruct`, 2 on other errors.
 
 ## Library
 
