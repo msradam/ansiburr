@@ -103,6 +103,51 @@ From there, the moves are:
 
 Working examples of each are in [`examples/`](./examples/).
 
+## Try the agent demo
+
+The hero GIF is reproducible locally in roughly two minutes once the prerequisites are in place.
+
+Prerequisites:
+
+- **Docker**. The demo runs against a small Linux container that ansiburr remediates over SSH.
+- **Ollama** running locally with a chat-capable model. The recording used `ibm/granite4:micro` (about 2 GB). Smaller variants (`ibm/granite4:350m`) work too, but they classify off-list more often, which is itself a useful demo of the validator catching the mistake.
+
+Setup (idempotent; safe to re-run):
+
+```sh
+# Build the target container and generate the demo SSH key.
+bash examples/service_remediation/setup.sh
+
+# Start the container. sshd lands on localhost:2222, nginx on localhost:8080.
+bash examples/service_remediation/start.sh
+
+# Pull the model used in the recording.
+ollama pull ibm/granite4:micro
+```
+
+Run:
+
+```sh
+OLLAMA_MODEL=ibm/granite4:micro uv run python examples/mast_sre_agent_walker.py
+```
+
+You will see eighteen steps land in the trace: container setup, fact gathering, log read and parse, LLM classification (magenta), validator gating (magenta), loop check, the OOM remediation chain (six Ansible modules), an external verification step, and the `done` terminal. The final line shows the label the model picked and the HTTP status the verify came back with.
+
+To switch the scenario the demo log presents to the model:
+
+```sh
+LOG_SCENARIO=disk_full OLLAMA_MODEL=ibm/granite4:micro \
+    uv run python examples/mast_sre_agent_walker.py
+```
+
+Other scenarios: `out_of_memory` (default), `disk_full`, `unknown` (forces the model off the allow-list, which is when the validator earns its keep).
+
+Teardown:
+
+```sh
+bash examples/service_remediation/teardown.sh
+```
+
 ## From an existing playbook
 
 If you already have an Ansible playbook, `from_playbook(...)` lifts it into a runnable Burr `Application` without rewriting the YAML. The full demo lives in [`examples/from_playbook/`](./examples/from_playbook/).
