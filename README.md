@@ -156,7 +156,7 @@ ansiburr graph examples/from_playbook/playbook.yml --format dot
 
 ## Demo corpus
 
-`examples/` contains twelve self-contained FSMs plus two playbook-conversion demos. Most of the FSMs run against a local Docker container set up by `examples/service_remediation/setup.sh`; the conversion demos and a few others run locally.
+`examples/` contains twelve self-contained FSMs plus three playbook-conversion demos. Most of the FSMs run against a local Docker container set up by `examples/service_remediation/setup.sh`; the conversion demos and a few others run locally.
 
 | Demo | What it shows | Collections used |
 |---|---|---|
@@ -173,6 +173,7 @@ ansiburr graph examples/from_playbook/playbook.yml --format dot
 | `plan_then_apply` | check+diff plan, deterministic review gate, `wait_until` polling sub-graph, apply with verify | `ansible.builtin` |
 | `from_playbook` | Small playbook (`command` + `register` + `when` + Jinja debug) lifted via `from_playbook(...)` | `ansible.builtin` |
 | `from_playbook_advanced` | Multi-feature playbook (`set_fact`, `block`, `loop`, `notify` + handlers, `changed_when`) lifted via `from_playbook(...)`; runs locally | `ansible.builtin` |
+| `from_playbook_role` | Multi-file role-style playbook with `ansible.builtin.include_tasks` dispatch to `tasks/setup-<distro>.yml`, mirroring the geerlingguy role shape | `ansible.builtin` |
 
 Each example runs in seconds. Run an individual demo with `uv run python examples/<name>/fsm.py` (or `run.py` for the conversion demos).
 

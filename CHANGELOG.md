@@ -6,6 +6,34 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.13] - 2026-05-21
+
+### Added
+
+- ``examples/from_playbook_role/``: a multi-file role-style demo with
+  ``main.yml`` + ``tasks/setup-debian.yml`` + ``tasks/setup-redhat.yml``.
+  Mirrors the structural shape every popular community Ansible role
+  (geerlingguy.mysql, .docker, .postgresql, .nginx) opens with: an
+  OS-conditional ``include_tasks`` dispatch to a setup-<distro>.yml
+  file. Validates the converter's cross-file include path against a
+  realistic playbook shape.
+
+### Fixed
+
+- Converter: ``ansible.builtin.include_tasks:`` and
+  ``ansible.builtin.import_tasks:`` (FQCN form, what modern roles use)
+  are now recognized in addition to the bare ``include_tasks:`` /
+  ``import_tasks:`` form. The community roles surveyed in v0.0.4 all
+  use the FQCN form, so without this the conversion silently treated
+  them as task modules instead of including them.
+- Converter: ``set_fact:`` tasks with ``notify:`` now correctly insert
+  a notify-marker so the handler fires. Previously the set_fact
+  early-return skipped the notify-handling logic.
+- Converter: ``set_fact:`` actions now write ``_last_changed=True`` to
+  match Ansible's "set_fact always reports changed" semantics. This
+  makes ``notify:`` on a set_fact behave as it would in a real
+  playbook.
+
 ## [0.0.12] - 2026-05-21
 
 Closes out the block/rescue/always trilogy. Every standard Ansible
@@ -404,4 +432,5 @@ Initial alpha release.
 [0.0.10]: https://github.com/msradam/ansiburr/releases/tag/v0.0.10
 [0.0.11]: https://github.com/msradam/ansiburr/releases/tag/v0.0.11
 [0.0.12]: https://github.com/msradam/ansiburr/releases/tag/v0.0.12
-[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.12...HEAD
+[0.0.13]: https://github.com/msradam/ansiburr/releases/tag/v0.0.13
+[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.13...HEAD

@@ -391,7 +391,17 @@ def _flatten_tasks(
             )
             continue
 
-        include_key = next((k for k in ("include_tasks", "import_tasks") if k in task), None)
+        # Accept both the bare key (``include_tasks: file.yml``) and the
+        # fully-qualified collection name (``ansible.builtin.include_tasks:
+        # file.yml``). The FQCN form is what every modern community role
+        # uses; the bare form is still in the wild from older roles.
+        _INCLUDE_KEYS = (
+            "include_tasks",
+            "import_tasks",
+            "ansible.builtin.include_tasks",
+            "ansible.builtin.import_tasks",
+        )
+        include_key = next((k for k in _INCLUDE_KEYS if k in task), None)
         if include_key is not None:
             include_value = task[include_key]
             if isinstance(include_value, str):
@@ -704,7 +714,11 @@ def _build_set_fact_action(
     """
     register_names = list(known_registers)
     pinned_vars = dict(play_vars)
-    writes = list(args.keys())
+    # Include ``_last_changed`` so notify markers downstream pick up that
+    # this set_fact "changed" state. Ansible's ``set_fact`` module reports
+    # ``changed: true`` by default, and notify-on-set_fact is a legitimate
+    # idiom for gating a handler on whether a fact was newly assigned.
+    writes = [*args.keys(), "_last_changed", "_last_action"]
 
     def _impl(state: State) -> State:
         context: dict[str, Any] = {**pinned_vars}
@@ -717,7 +731,7 @@ def _build_set_fact_action(
                 continue
             context.setdefault(key, value)
         rendered = _render_jinja(dict(args), context)
-        return state.update(**rendered)
+        return state.update(**rendered, _last_changed=True, _last_action=py_name)
 
     _impl.__name__ = py_name
     return action(reads=[], writes=writes)(_impl)
@@ -1282,7 +1296,9 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
         # runs in its own play and Ansible's fact propagation across plays
         # is unreliable. The arg dict's values are Jinja-rendered against
         # current state, so ``set_fact: total: "{{ a + b }}"`` works as
-        # authored.
+        # authored. Fall through to the notify / changed_when post-pass
+        # below so set_fact tasks with ``notify:`` still install the
+        # notify-marker.
         if module in _SET_FACT_MODULES:
             _record(
                 py_name=py,
@@ -1292,16 +1308,15 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
                 register=None,
                 meta=("set_fact", args),
             )
-            continue
-
-        _record(
-            py_name=py,
-            when_clause=_when_to_expr_string(when) if when is not None else None,
-            failed_when_clause=_when_to_expr_string(fw) if fw is not None else None,
-            ignore_errors=bool(task.get("ignore_errors", False)),
-            register=register,
-            meta=("module", module, args, register, become),
-        )
+        else:
+            _record(
+                py_name=py,
+                when_clause=_when_to_expr_string(when) if when is not None else None,
+                failed_when_clause=_when_to_expr_string(fw) if fw is not None else None,
+                ignore_errors=bool(task.get("ignore_errors", False)),
+                register=register,
+                meta=("module", module, args, register, become),
+            )
 
         # ``changed_when:`` overrides Ansible's idea of whether the task
         # changed anything (``changed_when: false`` for a read-only command,
