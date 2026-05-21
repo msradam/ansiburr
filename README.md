@@ -32,68 +32,56 @@ ansible-galaxy collection install community.general community.crypto community.d
 
 ## Quickstart
 
-An FSM that gathers facts from a remote host and dispatches to a distro-appropriate package inspection command:
+Save as `my_fsm.py` and run with `python my_fsm.py`. No remote host or extra setup required: `ansible.builtin.ping` runs against localhost via the `ansible-runner` already pulled in by `pip install ansiburr`.
 
 ```python
-from burr.core import ApplicationBuilder, action, expr
-from burr.tracking import LocalTrackingClient
-from ansiburr import host, initial_sentinels
-
-target = host(
-    "target",
-    ansible_host="server.example.com",
-    ansible_user="ops",
-    ansible_ssh_private_key_file="~/.ssh/id_ed25519",
-    become=True,
-)
+from burr.core import ApplicationBuilder, action
+from ansiburr import module_action, initial_sentinels
 
 
-@target.shell(register="pkg_inspect")
-def inspect_apt(state):
-    return {"cmd": "dpkg -l | wc -l"}
+# `@module_action` turns a function that returns a dict of Ansible module
+# args into a Burr `@action`. The module runs through ansible-runner and
+# the result projects into State. `writes=["ping"]` projects the module's
+# `ping` field; ansiburr also writes ambient `_last_*` sentinels on every
+# call (`_last_failed`, `_last_changed`, `_last_msg`, etc.).
+@module_action("ansible.builtin.ping", writes=["ping"])
+def check(state):
+    return {}
 
 
-@target.shell(register="pkg_inspect")
-def inspect_dnf(state):
-    return {"cmd": "rpm -qa | wc -l"}
-
-
-@action(
-    reads=["ansible_distribution", "ansible_pkg_mgr", "pkg_inspect"],
-    writes=["report"],
-)
+# A regular Burr `@action` is a pure-Python step. It reads from State and
+# returns the new State. Mixing module actions and plain actions in the
+# same graph is the common pattern.
+@action(reads=["ping", "_last_failed", "_last_msg"], writes=["report"])
 def summarize(state):
-    count = (state["pkg_inspect"].get("stdout") or "0").strip()
-    return state.update(
-        report=f"{state['ansible_distribution']} ({state['ansible_pkg_mgr']}): {count} pkgs"
-    )
+    if state["_last_failed"]:
+        return state.update(report=f"ping failed: {state['_last_msg']}")
+    return state.update(report=f"ansible reachable: ping={state['ping']!r}")
 
 
 app = (
     ApplicationBuilder()
-    .with_actions(
-        gather=target.gather_facts(),
-        inspect_apt=inspect_apt,
-        inspect_dnf=inspect_dnf,
-        summarize=summarize,
-    )
-    .with_transitions(
-        ("gather", "inspect_apt", expr("ansible_pkg_mgr == 'apt'")),
-        ("gather", "inspect_dnf", expr("ansible_pkg_mgr == 'dnf'")),
-        ("inspect_apt", "summarize"),
-        ("inspect_dnf", "summarize"),
-    )
-    .with_tracker(LocalTrackingClient(project="quickstart"))
-    .with_state(**initial_sentinels(), **target.initial_facts(), pkg_inspect={}, report="")
-    .with_entrypoint("gather")
+    .with_actions(check=check, summarize=summarize)
+    .with_transitions(("check", "summarize"))
+    .with_state(**initial_sentinels(), ping="", report="")
+    .with_entrypoint("check")
     .build()
 )
 
 _, _, final = app.run(halt_after=["summarize"])
 print(final["report"])
+# -> ansible reachable: ping='pong'
 ```
 
-The same FSM works against Debian, RHEL, Fedora, Arch, or any other distro Ansible supports. The branch is taken by the gathered fact, not by hard-coded logic.
+From there, the moves are:
+
+- Add `host()` to point a group of actions at a remote target without repeating the connection dict.
+- Use `host.gather_facts()` to expand `ansible_facts` into top-level state keys (`ansible_pkg_mgr`, `ansible_os_family`, etc.) and branch transitions on them.
+- Use `wait_until()` for polling sub-graphs where each attempt is a discrete trace step.
+- Use `check_mode=True` + `diff=True` for plan-then-apply patterns with a deterministic review gate.
+- Use `from_playbook("path/to/playbook.yml")` to lift an existing YAML playbook into an `Application` directly.
+
+Working examples of each are in [`examples/`](./examples/).
 
 ## Demo corpus
 
