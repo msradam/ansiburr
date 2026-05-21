@@ -156,6 +156,17 @@ def test_gather_facts_projects_ansible_facts_into_state() -> None:
     )
 
 
+def test_templated_include_vars_resolves_at_runtime() -> None:
+    """``include_vars: "{{ pkg_mgr }}-vars.yml"`` renders the path against
+    current state at task time and loads the matching YAML. Searches the
+    playbook's base_dir then ``vars/`` then ``../vars/``."""
+    app = ansiburr.from_playbook(FIXTURES / "playbook_templated_include.yml")
+    last, _, final = app.run(halt_after=["done", "escalate"])
+    assert last.name == "done"
+    assert final["distro_label"] == "debian"
+    assert final["package_manager"] == "apt"
+
+
 def test_include_vars_loads_yaml_into_state() -> None:
     """``include_vars: file: path`` reads the referenced YAML and writes
     every top-level key into Burr state. Downstream Jinja templates

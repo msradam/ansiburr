@@ -6,6 +6,40 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.17] - 2026-05-21
+
+Four of the six most-downloaded geerlingguy roles now convert cleanly
+(docker, nginx, mysql, redis). Postgresql and php block on
+``loop_control:`` and ``with_subelements:`` respectively.
+
+### Added
+
+- Converter: ``include_vars: "{{ ansible_facts.os_family }}.yml"``
+  (Jinja-templated path) lowers to a resolver that renders the
+  template against state at task time and searches in
+  ``base_dir``, ``base_dir/vars``, and ``base_dir/../vars`` for the
+  first existing file. Geerlingguy nginx, postgresql, redis, and php
+  all open with this pattern.
+- Converter: ``with_first_found:`` paired with
+  ``include_vars: "{{ item }}"`` lowers to the same first_found
+  resolver as the ``lookup('first_found', params)`` form. Geerlingguy
+  mysql and php use this older idiom.
+- ``environment:`` is now in the reserved task-key set, so tasks that
+  set environment variables on the module (geerlingguy nginx
+  setup-FreeBSD.yml uses this) convert without error.
+- Include-vars resolvers (templated path, first_found, and with_first_found)
+  now fill declared-but-unset state keys with their current values, so
+  Burr's reducer-writes check passes even when the chosen file is
+  missing keys the union scan declared.
+
+### Still rejected
+
+- ``loop_control:`` (postgresql uses this for ``label:`` modifiers
+  on a loop).
+- ``with_subelements:`` (php uses this for nested iteration).
+
+54/54 tests pass.
+
 ## [0.0.16] - 2026-05-21
 
 The combination of changes in this release is what lets the converter
@@ -507,4 +541,5 @@ Initial alpha release.
 [0.0.14]: https://github.com/msradam/ansiburr/releases/tag/v0.0.14
 [0.0.15]: https://github.com/msradam/ansiburr/releases/tag/v0.0.15
 [0.0.16]: https://github.com/msradam/ansiburr/releases/tag/v0.0.16
-[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.16...HEAD
+[0.0.17]: https://github.com/msradam/ansiburr/releases/tag/v0.0.17
+[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.17...HEAD

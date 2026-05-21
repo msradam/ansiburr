@@ -118,6 +118,12 @@ _RESERVED_TASK_KEYS: frozenset[str] = frozenset(
         "no_log",
         "args",
         "notify",
+        # ``environment:`` sets env vars on the module subprocess. We don't
+        # currently thread them through to ansible-runner, so the values are
+        # silently dropped. Adding it here so the task still converts; if
+        # the env vars are load-bearing, the converted FSM will need a
+        # manual touch-up.
+        "environment",
     }
 )
 
@@ -128,8 +134,12 @@ _FLATTEN_TASK_KEYS: frozenset[str] = frozenset({"include_tasks", "import_tasks",
 
 # ``loop:`` and ``with_items:`` are now first-class. ``with_dict``/
 # ``with_fileglob``/``with_subelements`` would each need their own item-
-# producing semantics; they still raise.
+# producing semantics; they still raise. ``with_first_found:`` is handled
+# specially when paired with ``include_vars: "{{ item }}"`` because that
+# combination is just a different syntax for the first_found lookup.
 _LOOP_KEYS: frozenset[str] = frozenset({"loop", "with_items"})
+
+_WITH_FIRST_FOUND_KEYS: frozenset[str] = frozenset({"with_first_found"})
 
 _UNSUPPORTED_TASK_KEYS: frozenset[str] = frozenset(
     {
@@ -189,7 +199,7 @@ def _module_from_task(task: Mapping[str, Any]) -> tuple[str, Any]:
             raise UnsupportedPlaybookConstruct(
                 f"task uses unsupported construct {key!r}: {task.get('name', task)}"
             )
-    excluded = _RESERVED_TASK_KEYS | _FLATTEN_TASK_KEYS | _LOOP_KEYS
+    excluded = _RESERVED_TASK_KEYS | _FLATTEN_TASK_KEYS | _LOOP_KEYS | _WITH_FIRST_FOUND_KEYS
     module_keys = [k for k in task if k not in excluded]
     if not module_keys:
         raise ValueError(f"task has no module reference: {task}")
@@ -667,6 +677,79 @@ _INCLUDE_VARS_MODULES: frozenset[str] = frozenset(
 )
 
 
+def _build_templated_include_vars_action(
+    *,
+    py_name: str,
+    base_dir: Path,
+    path_template: str,
+    namespace: str | None,
+    declared_writes: list[str],
+) -> Any:
+    """Build an action that resolves a Jinja-templated ``include_vars: path``
+    at task time and loads the resulting YAML file.
+
+    Mirrors Ansible's role-aware path resolution loosely: the rendered
+    path is searched in ``base_dir`` first, then ``base_dir/vars/``
+    (the most common location in role layouts), then ``base_dir/../vars/``
+    (when the playbook itself lives under tasks/). Geerlingguy's
+    nginx/php/postgresql/redis roles all use ``include_vars: "{{ ansible_facts.os_family }}.yml"``
+    expecting role-style vars/ lookup.
+
+    ``declared_writes`` is the union of top-level keys across every YAML
+    file currently present in the candidate directories, scanned at
+    conversion time so Burr knows up front what state fields this action
+    may touch."""
+    search_roots = [
+        base_dir,
+        base_dir / "vars",
+        base_dir.parent / "vars",
+    ]
+
+    # Pre-build a "fill-in" dict so Burr's reducer-writes check is satisfied
+    # even when the loaded file is missing keys declared in the union scan.
+    # Missing keys land as None.
+    declared = list(declared_writes)
+
+    def _impl(state: State) -> State:
+        context: dict[str, Any] = {}
+        for key, value in state.get_all().items():
+            if key.startswith("_"):
+                continue
+            context.setdefault(key, value)
+        rendered = _render_jinja(path_template, context)
+        if not isinstance(rendered, str) or not rendered.strip():
+            raise ValueError(
+                f"include_vars: template {path_template!r} rendered empty"
+            )
+        for root in search_roots:
+            candidate = (root / rendered).resolve()
+            if candidate.exists():
+                with candidate.open() as fh:
+                    loaded = yaml.safe_load(fh) or {}
+                if not isinstance(loaded, Mapping):
+                    raise ValueError(
+                        f"include_vars: {candidate} top-level must be a mapping"
+                    )
+                if namespace is not None:
+                    return state.update(**{namespace: dict(loaded)})
+                # Fill missing declared keys with the current state value
+                # (or None when never seen). This keeps Burr's
+                # reducer-writes check happy without clobbering existing
+                # state that this particular file didn't override.
+                state_now = state.get_all()
+                update: dict[str, Any] = {k: state_now.get(k) for k in declared}
+                update.update(loaded)
+                return state.update(**update)
+        raise FileNotFoundError(
+            f"include_vars: template rendered to {rendered!r}; not found in any of "
+            f"{[str(r) for r in search_roots]}"
+        )
+
+    _impl.__name__ = py_name
+    writes = [namespace] if namespace else declared
+    return action(reads=[], writes=writes)(_impl)
+
+
 def _build_first_found_include_vars_action(
     *,
     py_name: str,
@@ -695,6 +778,7 @@ def _build_first_found_include_vars_action(
     """
     pinned_task_vars = dict(task_vars)
     pinned_params = dict(params)
+    declared = list(declared_writes)
 
     def _impl(state: State) -> State:
         # Build the Jinja context: play vars + non-internal state + task vars.
@@ -721,10 +805,14 @@ def _build_first_found_include_vars_action(
                         raise ValueError(
                             f"include_vars: {candidate} top-level must be a mapping"
                         )
-                    return state.update(**dict(loaded))
-        raise FileNotFoundError(
-            f"first_found: none of {files} found in {paths} under {base_dir}"
-        )
+                    state_now = state.get_all()
+                    update: dict[str, Any] = {k: state_now.get(k) for k in declared}
+                    update.update(loaded)
+                    return state.update(**update)
+        # Keep declared keys at their current values when no file matches
+        # (typical with ``skip: true``); leave the state intact.
+        state_now = state.get_all()
+        return state.update(**{k: state_now.get(k) for k in declared})
 
     _impl.__name__ = py_name
     return action(reads=[], writes=declared_writes)(_impl)
@@ -1484,10 +1572,12 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
             )
         elif module in _INCLUDE_VARS_MODULES:
             # ``include_vars: file: path`` (or short form ``include_vars: path``)
-            # is the simple case. The geerlingguy-style
-            # ``include_vars: "{{ lookup('first_found', params) }}"`` with
-            # task-level ``vars: { params: {...} }`` lowers via the
-            # first_found resolver action below.
+            # is the simple case. Variations also handled:
+            # - ``include_vars: "{{ lookup('first_found', params) }}"`` with
+            #   task-level ``vars: { params: {...} }``
+            # - ``include_vars: "{{ item }}"`` with a ``with_first_found:``
+            #   list of candidate files (the older idiom; geerlingguy mysql
+            #   and php use this).
             file_value: Any
             namespace_value: str | None
             if isinstance(args, Mapping):
@@ -1502,6 +1592,54 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
                     "``lookup('first_found', params)`` form are supported; "
                     f"got {file_value!r}"
                 )
+            # ``with_first_found`` paired with ``include_vars: "{{ item }}"``:
+            # the loop becomes a first_found over the listed files.
+            wff = task.get("with_first_found")
+            if wff is not None:
+                if not isinstance(wff, list) or not wff:
+                    raise ValueError(
+                        "with_first_found: must be a non-empty list"
+                    )
+                # The first element is either a list-of-strings (each one is
+                # a candidate file template) or a dict with ``files:`` /
+                # ``paths:`` / ``skip:``.
+                first = wff[0]
+                if isinstance(first, list):
+                    params_dict = {"files": first, "paths": ["."]}
+                elif isinstance(first, Mapping):
+                    params_dict = {
+                        "files": first.get("files") or [],
+                        "paths": first.get("paths") or ["."],
+                    }
+                else:
+                    params_dict = {"files": [str(first)], "paths": ["."]}
+                declared_writes = _scan_yaml_keys_in_paths(
+                    base_dir,
+                    [".", "vars", "../vars", *[str(p) for p in params_dict["paths"]]],
+                )
+                # The first_found resolver searches the path prefixes against
+                # the file list. Add the role-aware vars directories to the
+                # paths so geerlingguy's "files: [{{ os_family }}.yml]" with
+                # no explicit path works.
+                resolver_params = {
+                    "files": params_dict["files"],
+                    "paths": [".", *{*params_dict["paths"], "vars", "../vars"}],
+                }
+                _record(
+                    py_name=py,
+                    when_clause=_when_to_expr_string(when) if when is not None else None,
+                    failed_when_clause=None,
+                    ignore_errors=True,
+                    register=None,
+                    meta=(
+                        "include_vars_first_found",
+                        base_dir,
+                        resolver_params,
+                        {},  # no task vars used; params are inline
+                        declared_writes,
+                    ),
+                )
+                continue
             # first_found path: the include_vars value is a Jinja template
             # whose only function call is ``lookup('first_found', <name>)``.
             # The named param dict comes from the task's ``vars:`` block.
@@ -1547,12 +1685,34 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
                         declared_writes,
                     ),
                 )
+            elif "{{" in file_value:
+                # Templated path (``include_vars: "{{ ansible_facts.os_family }}.yml"``).
+                # Pre-scan the candidate directories so we know what state
+                # keys this action may write.
+                declared_writes = _scan_yaml_keys_in_paths(
+                    base_dir,
+                    [".", "vars", "../vars"],
+                )
+                _record(
+                    py_name=py,
+                    when_clause=_when_to_expr_string(when) if when is not None else None,
+                    failed_when_clause=None,
+                    ignore_errors=True,
+                    register=None,
+                    meta=(
+                        "include_vars_templated",
+                        base_dir,
+                        file_value,
+                        namespace_value,
+                        declared_writes,
+                    ),
+                )
             else:
-                if "{{" in file_value or "lookup(" in file_value:
+                if "lookup(" in file_value:
                     raise UnsupportedPlaybookConstruct(
-                        "include_vars: only literal paths and the "
-                        "``lookup('first_found', params)`` form are supported; "
-                        f"got {file_value!r}"
+                        "include_vars: only literal paths, Jinja-templated "
+                        "paths, and the ``lookup('first_found', params)`` "
+                        f"form are supported; got {file_value!r}"
                     )
                 vars_path = (base_dir / file_value).resolve()
                 if not vars_path.exists():
@@ -1737,6 +1897,15 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
                 base_dir=base,
                 params=params_dict,
                 task_vars=task_vars_dict,
+                declared_writes=declared,
+            )
+        elif kind == "include_vars_templated":
+            _, base, path_tmpl, namespace_v, declared = meta
+            actions[candidate] = _build_templated_include_vars_action(
+                py_name=candidate,
+                base_dir=base,
+                path_template=path_tmpl,
+                namespace=namespace_v,
                 declared_writes=declared,
             )
         else:
