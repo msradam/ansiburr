@@ -40,6 +40,18 @@ jobs:
       - name: Mypy
         run: uv run mypy src/ansiburr
 
+      - name: Vulture (dead-code check)
+        run: uv run vulture src/ansiburr/ --min-confidence 80
+
+      - name: Refurb (modernization check)
+        # Refurb requires running from inside src/ so mypy doesn't see the
+        # package under both ``src.ansiburr`` and ``ansiburr``. FURB184 is
+        # suppressed because it triggers on ``args = parse_args(); args.func(args)``
+        # which can't be chained (args is referenced twice).
+        run: |
+          cd src
+          uv run --project .. refurb --ignore 184 ansiburr
+
       - name: Pytest
         # Tests that talk to ansible-runner need ansible-playbook on PATH;
         # ansible-core (a runtime dep) provides it through uv sync. Skip

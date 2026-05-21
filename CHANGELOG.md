@@ -6,6 +6,21 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.26] - 2026-05-21
+
+### Changed
+
+- CI workflow runs ``vulture`` (dead-code detection) and ``refurb``
+  (modernization suggestions) on every push and pull request. They join
+  the existing ruff + mypy + pytest gate, so future hygiene regressions
+  fail the build instead of silently accumulating.
+- Refurb is invoked with ``--ignore 184`` because the one finding
+  (FURB184 on ``args = parse_args(...); args.func(args)`` in cli.py)
+  can't be chained without parsing argv twice.
+- ``dict(state_dict)`` in the changed_when evaluator switched to
+  ``state_dict.copy()`` (FURB123 modernization). Burr's
+  ``State.get_all()`` returns a dict so ``.copy()`` is safe.
+
 ## [0.0.25] - 2026-05-21
 
 Refactor / hygiene release. No behavior change; all 61 tests pass and all
@@ -755,4 +770,5 @@ Initial alpha release.
 [0.0.23]: https://github.com/msradam/ansiburr/releases/tag/v0.0.23
 [0.0.24]: https://github.com/msradam/ansiburr/releases/tag/v0.0.24
 [0.0.25]: https://github.com/msradam/ansiburr/releases/tag/v0.0.25
-[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.25...HEAD
+[0.0.26]: https://github.com/msradam/ansiburr/releases/tag/v0.0.26
+[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.26...HEAD

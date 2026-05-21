@@ -1147,9 +1147,7 @@ def _build_changed_when_post(
     def _impl(state: State) -> State:
         state_dict = state.get_all()
         try:
-            # eval needs a dict for the locals namespace; state.get_all may
-            # return a Mapping subclass, so wrap defensively.
-            value = bool(eval(translated, {"__builtins__": {}}, dict(state_dict)))
+            value = bool(eval(translated, {"__builtins__": {}}, state_dict.copy()))
         except Exception:
             # If the expression can't evaluate (e.g. references a register
             # the upstream task didn't populate), be conservative: don't
