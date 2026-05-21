@@ -322,25 +322,17 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
     for i, current in enumerate(py_names):
         nxt = py_names[i + 1] if i + 1 < len(py_names) else "done"
 
-        # `when:` on the NEXT task: if it skips, we still go to the one after.
-        # Implemented by adding a transition that jumps the next task entirely
-        # when its `when:` is False. (We'll just route to next-of-next when when-false.)
-        # For simplicity in v1, ``when:`` only gates whether the current task
-        # is reached; if false, we skip to the task that would have followed.
-        # That means: when assessing transitions OUT of task[i-1], we check
-        # the NEXT task's `when:`. Handle this loop-style below.
-
-        # Failure routing for the current task (when its own predicate matched
-        # and we executed it):
+        # Failure routing for the current task: if the failed_when expression
+        # is satisfied (or _last_failed if none was given) and ignore_errors
+        # was not set, the FSM routes to the escalate terminal.
         if not ignore_errors_flags[i]:
             failure_predicate = failed_when_clauses[i] or "_last_failed"
             transitions.append((current, "escalate", expr(failure_predicate)))
 
-        # Predicate for the NEXT task: if the next task has when: X and X is
-        # false, we skip over it. Build the actual destination by walking the
-        # chain of "next" tasks whose when: predicates fail.
-        # In v1, only single-level skip is implemented: when:false on task[i+1]
-        # routes directly to task[i+2] (or done if at the end).
+        # ``when:`` skip behavior: if the next task carries a ``when:`` whose
+        # predicate evaluates to False at this point in the run, advance past
+        # it directly to the task after. v1 implements single-level skip;
+        # consecutive skipped tasks aren't chained.
         if i + 1 < len(py_names) and when_clauses[i + 1] is not None:
             next_when = when_clauses[i + 1]
             skip_target = py_names[i + 2] if i + 2 < len(py_names) else "done"

@@ -40,9 +40,9 @@ from ansiburr._action import (
 from ansiburr._runner import run_module
 
 # Common Ansible facts a state-aware FSM is likely to branch on. Not exhaustive
-# (the ``setup`` module returns 100+ keys depending on host), just the ones we
-# expect transitions to reference. Users can extend via ``extra=`` on
-# ``gather_facts()`` and ``initial_facts()``.
+# (the ``setup`` module returns 100+ keys depending on host); these are the
+# keys transitions reach for most often. Callers can extend the list via
+# ``extra=`` on ``gather_facts()`` and ``initial_facts()``.
 DEFAULT_FACT_KEYS: tuple[str, ...] = (
     "ansible_os_family",
     "ansible_distribution",

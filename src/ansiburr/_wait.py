@@ -115,10 +115,10 @@ def wait_until(
     }
 
     # Transitions are tried in declaration order; first matching predicate wins.
-    # That means: success path first (so we exit as soon as the condition holds),
-    # then timeout (so we bail if attempts is at the cap), then the default
-    # retry edge into wait. The check action itself is run on entry; downstream
-    # of it we branch on the condition + attempt count.
+    # Order: success path first (exit as soon as the condition holds), then
+    # timeout (bail if attempts is at the cap), then the default retry edge
+    # into wait. The check action runs on entry; transitions downstream branch
+    # on the condition and attempt count.
     transitions: list[tuple] = [
         (check_name, on_success, expr(condition_expr)),
         (check_name, on_timeout, expr(f"{attempts_key} >= {max_attempts - 1}")),

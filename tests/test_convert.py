@@ -25,7 +25,7 @@ def test_when_predicate_skips_task() -> None:
     app = ansiburr.from_playbook(FIXTURES / "playbook_with_when.yml")
     last, _, final = app.run(halt_after=["done", "escalate"])
     assert last.name == "done"
-    # The middle task ("b") must not have been the last action — we should
+    # The middle task "b" must not have been the last action; the FSM should
     # have skipped straight from "a" to "c".
     assert final["_last_action"] == "c"
 

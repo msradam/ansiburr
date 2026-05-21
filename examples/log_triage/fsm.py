@@ -134,10 +134,9 @@ _LINE_RE = re.compile(
 def parse_events(state: State) -> State:
     """Decode base64, regex-parse each line into a structured event.
 
-    This is the canonical Ansible painpoint: doing this in a playbook
-    means Jinja2 ``regex_findall`` + ``selectattr`` + ``map(attribute=...)``
-    chains, or shelling out to ``awk``/``grep`` and re-parsing the stdout
-    string. Here it is just normal Python.
+    The equivalent in a playbook is Jinja2 ``regex_findall`` plus
+    ``selectattr`` plus ``map(attribute=...)`` chains, or a shelled-out
+    ``awk`` or ``grep`` pipeline that re-parses the captured stdout.
     """
     raw = base64.b64decode(state["log_b64"] or "").decode("utf-8", errors="replace")
     events: list[dict[str, Any]] = []

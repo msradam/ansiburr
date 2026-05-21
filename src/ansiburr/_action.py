@@ -161,8 +161,8 @@ def module_action(
             update["_last_msg"] = str(result.get("msg") or "")
             # Return (result, state) so Burr's tracker captures the full Ansible
             # module output (stdout/stderr/rc/diff/changed/...) alongside the state
-            # snapshot. State alone is lossy: a 300-line nginx -t output, or a
-            # template module's full diff, is gone if we don't surface it here.
+            # snapshot. State alone would drop the rich payload: a 300-line
+            # nginx -t output, or a template module's full diff, would be lost.
             return result, state.update(**update)
 
         return wrapped

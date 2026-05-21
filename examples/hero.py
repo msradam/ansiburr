@@ -1,13 +1,12 @@
 """Hero demo: deploy something, poll until it's ready, read, clean up.
 
-The FSM has six declared actions plus a ``wait_until`` polling sub-graph.
-A background subprocess simulates a slow service by touching a marker
-file after a two-second delay. The FSM polls until the marker appears,
-slurps it, and cleans up.
+Six declared actions plus a ``wait_until`` polling sub-graph. A background
+subprocess simulates a slow service by touching a marker file after a
+two-second delay. The FSM polls for the marker on a fixed interval, reads
+the file once it appears, and removes the state directory at the end.
 
-The polling loop is what makes this not-a-playbook: each poll attempt is
-a discrete Burr step. Watch the colored output show probe → wait → probe
-→ wait → probe → found, instead of one opaque blocking task.
+Each poll attempt is a discrete Burr step in the trace rather than one
+opaque blocking task.
 
 Run::
 

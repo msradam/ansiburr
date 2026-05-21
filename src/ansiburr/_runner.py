@@ -82,9 +82,9 @@ def run_module(
             hostvars["ansible_connection"] = "local"
             # Default to the venv interpreter so controller-side collections
             # (community.docker, community.crypto, ...) see the same packages
-            # our user installed via uv/pip. Otherwise Ansible's auto-discovery
+            # the user installed via uv/pip. Otherwise Ansible's auto-discovery
             # picks the first python on PATH, which is usually the system Python
-            # without our dependencies.
+            # without ansiburr's dependencies.
             hostvars.setdefault("ansible_python_interpreter", sys.executable)
         if hostvars:
             host_vars_dir = inv_dir / "host_vars"
