@@ -153,9 +153,10 @@ _UNSUPPORTED_TASK_KEYS: frozenset[str] = frozenset(
         "always",
         "with_dict",
         "with_fileglob",
-        "import_role",
+        # ``include`` (the legacy generic include) is intentionally still
+        # rejected. Modern playbooks should use ``include_tasks`` or
+        # ``include_role`` which we support.
         "include",
-        "include_role",
     }
 )
 
@@ -455,6 +456,51 @@ def _flatten_tasks(
                 _flatten_tasks(
                     included_tasks,
                     base_dir=included_path.parent,
+                    inherited_when=combined_when,
+                    inherited_notify=combined_notify,
+                    depth=depth + 1,
+                )
+            )
+            continue
+
+        # ``include_role:`` / ``import_role:`` (task-level role inclusion).
+        # Resolves the role under the playbook's roles/ directory and
+        # inlines its ``tasks/main.yml``. Role-level vars and defaults are
+        # NOT pulled in for the task-level form; use play-level ``roles:``
+        # for full role expansion with vars merging.
+        _ROLE_TASK_KEYS = (
+            "include_role",
+            "import_role",
+            "ansible.builtin.include_role",
+            "ansible.builtin.import_role",
+        )
+        role_task_key = next((k for k in _ROLE_TASK_KEYS if k in task), None)
+        if role_task_key is not None:
+            role_args = task[role_task_key]
+            if not isinstance(role_args, Mapping):
+                raise ValueError(
+                    f"{role_task_key}: must be a mapping with ``name:``; got "
+                    f"{type(role_args).__name__}"
+                )
+            role_name_value = role_args.get("name")
+            if not isinstance(role_name_value, str) or not role_name_value:
+                raise ValueError(f"{role_task_key}: missing ``name:`` field")
+            if "{{" in role_name_value or "{%" in role_name_value:
+                raise UnsupportedPlaybookConstruct(
+                    f"{role_task_key}: Jinja-templated role names are not "
+                    f"supported (got {role_name_value!r})"
+                )
+            role_dir = _resolve_role_dir(role_name_value, base_dir)
+            role_tasks = _load_role_yaml(role_dir, "tasks/main.yml") or []
+            if not isinstance(role_tasks, list):
+                raise ValueError(
+                    f"{role_task_key} {role_name_value!r}: tasks/main.yml "
+                    "must be a list of tasks"
+                )
+            flat.extend(
+                _flatten_tasks(
+                    role_tasks,
+                    base_dir=role_dir / "tasks",
                     inherited_when=combined_when,
                     inherited_notify=combined_notify,
                     depth=depth + 1,

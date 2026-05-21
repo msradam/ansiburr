@@ -39,6 +39,27 @@ def test_register_capture_lands_in_state() -> None:
     assert ping.get("ping") == "pong"
 
 
+def test_task_level_include_role_inlines_role_tasks() -> None:
+    """``include_role: name: myrole`` (and ``import_role:``) inside a task
+    list resolves the role under ``roles/myrole/`` and inlines its
+    ``tasks/main.yml`` at conversion time. The calling task's ``when:``
+    propagates to each role task as inherited when.
+
+    Task-level include_role does NOT pull in role-level vars or defaults
+    (only the tasks); that's the play-level ``roles:`` behavior. So
+    ``myrole_who`` is left undefined in this test even though the role
+    references it in a debug message."""
+    app = ansiburr.from_playbook(FIXTURES / "playbook_with_include_role.yml")
+    last, _, final = app.run(halt_after=["done", "escalate"])
+    assert last.name == "done"
+    # Role tasks ran (the role's set_fact flipped myrole_ran).
+    assert final["myrole_ran"] is True
+    # Names: role tasks appear AFTER the calling pick_phase action.
+    names = [a.name for a in app.graph.actions]
+    assert names.index("pick_phase") < names.index("role_mark")
+    assert names.index("role_mark") < names.index("after_include_role")
+
+
 def test_play_with_roles_inlines_role_tasks_and_vars() -> None:
     """``roles: - myrole`` resolves ``roles/myrole/{tasks,vars,defaults,
     handlers}/main.yml`` next to the playbook, inlines role tasks before
