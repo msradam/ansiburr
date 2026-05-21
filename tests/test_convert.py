@@ -39,11 +39,37 @@ def test_register_capture_lands_in_state() -> None:
     assert ping.get("ping") == "pong"
 
 
-def test_block_with_always_still_raises() -> None:
-    """``block:`` group-only and ``block: + rescue:`` are supported.
-    ``block: + always:`` is not yet."""
-    with pytest.raises(ansiburr.UnsupportedPlaybookConstruct, match="always"):
+def test_block_rescue_plus_always_still_raises() -> None:
+    """``block: + rescue:`` (v0.0.10) and ``block: + always:`` (v0.0.11) are
+    each supported alone. Combining all three (block + rescue + always) is
+    not yet."""
+    with pytest.raises(ansiburr.UnsupportedPlaybookConstruct, match=r"rescue.*always"):
         ansiburr.from_playbook(FIXTURES / "playbook_unsupported_block.yml")
+
+
+def test_block_plus_always_runs_always_after_block_success() -> None:
+    """A block + always with no rescue, where the block succeeds, runs
+    every always task after the block completes."""
+    app = ansiburr.from_playbook(FIXTURES / "playbook_block_always.yml")
+    last, _, final = app.run(halt_after=["done", "escalate"])
+    assert last.name == "done"
+    assert final["block_succeeded"] is True
+    assert final["always_ran"] is True
+
+
+def test_block_plus_always_runs_always_after_block_failure_then_escalates() -> None:
+    """A block + always where the block fails:
+      - always still runs (always must run regardless of block outcome)
+      - after always, the latched block failure is restored
+      - the FSM reaches escalate, not done
+    """
+    app = ansiburr.from_playbook(FIXTURES / "playbook_block_always_failure.yml")
+    last, _, final = app.run(halt_after=["done", "escalate"])
+    assert last.name == "escalate"
+    # Always ran even though the block failed.
+    assert final["always_ran"] is True
+    # The latched failure was restored before escalation.
+    assert final["_last_failed"] is True
 
 
 def test_block_plus_rescue_runs_rescue_on_block_failure() -> None:

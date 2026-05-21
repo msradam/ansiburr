@@ -6,6 +6,41 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.11] - 2026-05-21
+
+### Added
+
+- Converter: ``block: + always:`` round-trip. Block tasks execute as
+  usual; whether the block succeeds or fails, the ``always:`` chain
+  runs unconditionally; block failures are latched into a sticky state
+  field so they propagate to ``escalate`` only after the always chain
+  finishes (matching Ansible semantics: always runs no matter what,
+  failure surfaces afterward).
+- Synthesized ``_block_save_failure`` and ``_block_restore_failure``
+  actions sandwich the always chain. Save captures ``_last_failed``
+  into a per-block flag before always runs (which would otherwise
+  reset the sentinels via the success path). Restore re-applies the
+  flag's value to ``_last_failed`` after the always chain finishes, so
+  the standard escalate edge fires when needed.
+
+### Still rejected
+
+- ``block: + rescue: + always:`` (all three) still raises. The path
+  through rescue plus always needs a coordinated lowering of both the
+  rescue-clear and the always-restore. Planned for v0.0.12.
+- Nested block within a block+always (or block+rescue) raises.
+- ``loop:`` / ``with_items:``, ``notify:``, ``changed_when:`` inside a
+  block, rescue, or always still raise.
+
+### Tests
+
+- Two new tests: ``block + always`` with successful block runs every
+  always task; ``block + always`` with failed block still runs every
+  always task and then escalates with ``_last_failed`` restored.
+- ``test_block_with_always_still_raises`` renamed to
+  ``test_block_rescue_plus_always_still_raises`` since the only
+  still-rejected combination is all three together.
+
 ## [0.0.10] - 2026-05-21
 
 ### Added
@@ -336,4 +371,5 @@ Initial alpha release.
 [0.0.8]: https://github.com/msradam/ansiburr/releases/tag/v0.0.8
 [0.0.9]: https://github.com/msradam/ansiburr/releases/tag/v0.0.9
 [0.0.10]: https://github.com/msradam/ansiburr/releases/tag/v0.0.10
+[0.0.11]: https://github.com/msradam/ansiburr/releases/tag/v0.0.11
 [Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.10...HEAD

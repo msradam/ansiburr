@@ -273,15 +273,44 @@ def _flatten_tasks(
         combined_notify = inherited_notify + task_notify
 
         if "block" in task:
-            if "always" in task:
+            if "rescue" in task and "always" in task:
                 raise UnsupportedPlaybookConstruct(
-                    "always: clauses on block: are not yet supported "
+                    "block: with both rescue: and always: is not yet supported "
                     f"(task: {task.get('name', '<unnamed>')!r}); "
-                    "rescue: alone is supported as of v0.0.10"
+                    "rescue: alone (v0.0.10) and always: alone (v0.0.11) work"
                 )
             block_tasks = task["block"]
             if not isinstance(block_tasks, list):
                 raise ValueError(f"block: must be a list, got {type(block_tasks).__name__}")
+            if "always" in task:
+                # block + always (no rescue). Pass through without inlining;
+                # main converter loop wires the failure-preservation actions
+                # around the always chain.
+                always_tasks = task["always"]
+                if not isinstance(always_tasks, list):
+                    raise ValueError(
+                        f"always: must be a list, got {type(always_tasks).__name__}"
+                    )
+                preserved = {
+                    "block": _flatten_tasks(
+                        block_tasks,
+                        base_dir=base_dir,
+                        inherited_when=combined_when,
+                        inherited_notify=combined_notify,
+                        depth=depth + 1,
+                    ),
+                    "always": _flatten_tasks(
+                        always_tasks,
+                        base_dir=base_dir,
+                        inherited_when=combined_when,
+                        inherited_notify=combined_notify,
+                        depth=depth + 1,
+                    ),
+                }
+                if task.get("name"):
+                    preserved["name"] = task["name"]
+                flat.append(preserved)
+                continue
             if "rescue" in task:
                 # Don't inline; the main converter loop handles block+rescue
                 # so it can wire the failure -> rescue routing. The inherited
@@ -555,6 +584,49 @@ def _build_loop_advance(
 _SET_FACT_MODULES: frozenset[str] = frozenset({"set_fact", "ansible.builtin.set_fact"})
 
 
+def _build_save_failure_action(*, py_name: str, flag_state_key: str) -> Any:
+    """Build a pure-Python action that latches ``_last_failed`` into a sticky
+    state field so it survives the subsequent ``always:`` chain.
+
+    Inserted at the failure-routing target of block tasks under a
+    ``block + always`` lowering. When a block task fails, control routes
+    through this action on the way to the always chain; the action snapshots
+    the failure into ``flag_state_key`` while leaving the live sentinels
+    alone. Downstream, the always tasks reset ``_last_failed`` to False on
+    success; ``_build_restore_failure_action`` re-applies the failure from
+    the flag so post-block tasks see it.
+    """
+    writes = [flag_state_key]
+
+    def _impl(state: State) -> State:
+        if state.get("_last_failed"):
+            return state.update(**{flag_state_key: True})
+        return state
+
+    _impl.__name__ = py_name
+    return action(reads=["_last_failed"], writes=writes)(_impl)
+
+
+def _build_restore_failure_action(*, py_name: str, flag_state_key: str) -> Any:
+    """Build a pure-Python action that re-applies a latched block failure.
+
+    Inserted between the last ``always:`` task and the downstream
+    post-block task. If ``flag_state_key`` was set earlier (by
+    :func:`_build_save_failure_action` after a block task failed), this
+    action restores ``_last_failed=True`` so the standard escalate
+    transition fires for the downstream task.
+    """
+    writes = ["_last_failed"]
+
+    def _impl(state: State) -> State:
+        if state.get(flag_state_key):
+            return state.update(_last_failed=True)
+        return state
+
+    _impl.__name__ = py_name
+    return action(reads=[flag_state_key], writes=writes)(_impl)
+
+
 def _build_clear_failure_action(*, py_name: str) -> Any:
     """Build a pure-Python action that resets the failure sentinels.
 
@@ -806,13 +878,101 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
     for idx, task in enumerate(leaf_tasks):
         raw_name = task.get("name") or f"task_{idx + 1}"
 
-        # block + rescue (no always for v0.0.10) is lowered into a flat
-        # sequence: [block_task_1, ..., block_last, rescue_first, ...,
-        # rescue_last, clear_action]. Failure in any block task routes to
-        # rescue_first; rescue_last falls through to clear_action by default;
-        # clear_action wipes the failure sentinels so downstream tasks don't
-        # see a stale failure. The override logic for block-on-success
-        # (skipping past the rescue chain) lives in the transition builder.
+        # ``block:`` with a rescue: or always: clause is lowered here.
+        # Pure block (no rescue, no always) is already inlined by
+        # ``_flatten_tasks`` and never reaches this branch.
+        if "block" in task and "always" in task:
+            block_inner = task["block"]
+            always_inner = task["always"]
+            block_leaves = _flatten_tasks(block_inner, base_dir=base_dir)
+            always_leaves = _flatten_tasks(always_inner, base_dir=base_dir)
+            if not block_leaves:
+                raise ValueError("block: must contain at least one task")
+            if not always_leaves:
+                raise ValueError("always: must contain at least one task")
+            if any("block" in leaf for leaf in block_leaves + always_leaves):
+                raise UnsupportedPlaybookConstruct(
+                    "nested block within block+always is not yet supported"
+                )
+
+            block_py_names = []
+            for b_idx, btask in enumerate(block_leaves):
+                b_raw = btask.get("name") or f"block_task_{b_idx + 1}"
+                block_py_names.append(_unique(_slugify(b_raw)))
+            always_py_names: list[str] = []
+            for a_idx, atask in enumerate(always_leaves):
+                a_raw = atask.get("name") or f"always_task_{a_idx + 1}"
+                always_py_names.append(_unique(_slugify(a_raw)))
+            save_py_name = _unique("_block_save_failure")
+            restore_py_name = _unique("_block_restore_failure")
+            flag_key = f"_block_failure_remembered_{len(block_ctxs)}"
+
+            def _record_inner_always(py: str, t: dict[str, Any]) -> None:
+                if any(k in t for k in ("loop", "with_items", "notify", "changed_when")):
+                    raise UnsupportedPlaybookConstruct(
+                        "loop:/with_items:/notify:/changed_when: inside block: "
+                        "or always: are not yet supported; "
+                        f"task: {t.get('name', '<unnamed>')!r}"
+                    )
+                module, args = _module_from_task(t)
+                register = t.get("register")
+                become = bool(t.get("become", play_become))
+                when = t.get("when")
+                fw = t.get("failed_when")
+                if module in _SET_FACT_MODULES:
+                    _record(
+                        py_name=py,
+                        when_clause=_when_to_expr_string(when) if when is not None else None,
+                        failed_when_clause=None,
+                        ignore_errors=True,
+                        register=None,
+                        meta=("set_fact", args),
+                    )
+                    return
+                _record(
+                    py_name=py,
+                    when_clause=_when_to_expr_string(when) if when is not None else None,
+                    failed_when_clause=_when_to_expr_string(fw) if fw is not None else None,
+                    ignore_errors=bool(t.get("ignore_errors", False)),
+                    register=register,
+                    meta=("module", module, args, register, become),
+                )
+
+            # Block tasks route failure to the save_failure action (which
+            # latches the failure into the flag), then onward to the always
+            # chain. block_last's default success-edge is overridden to the
+            # save action so the path always passes through it; save is a
+            # no-op when _last_failed is False.
+            for b_idx, (py, btask) in enumerate(
+                zip(block_py_names, block_leaves, strict=True)
+            ):
+                is_last_block = b_idx == len(block_py_names) - 1
+                block_ctxs[py] = (save_py_name, save_py_name, is_last_block)
+                _record_inner_always(py, btask)
+            _record(
+                py_name=save_py_name,
+                when_clause=None,
+                failed_when_clause=None,
+                ignore_errors=True,
+                register=None,
+                meta=("block_save_failure", flag_key),
+            )
+            for py, atask in zip(always_py_names, always_leaves, strict=True):
+                _record_inner_always(py, atask)
+            # restore_failure needs the standard escalate edge: after it
+            # re-applies ``_last_failed`` from the latched flag, the very next
+            # transition out of restore_failure should route to escalate. So
+            # ignore_errors stays False so the failure transition is emitted.
+            _record(
+                py_name=restore_py_name,
+                when_clause=None,
+                failed_when_clause=None,
+                ignore_errors=False,
+                register=None,
+                meta=("block_restore_failure", flag_key),
+            )
+            continue
+
         if "block" in task:
             block_inner = task["block"]
             rescue_inner = task["rescue"]
@@ -830,7 +990,7 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
 
             # Pre-allocate py_names for everything so block tasks can carry
             # the rescue_first reference forward.
-            block_py_names: list[str] = []
+            block_py_names = []
             for b_idx, btask in enumerate(block_leaves):
                 b_raw = btask.get("name") or f"block_task_{b_idx + 1}"
                 block_py_names.append(_unique(_slugify(b_raw)))
@@ -1122,6 +1282,16 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
             )
         elif kind == "clear_failure":
             actions[candidate] = _build_clear_failure_action(py_name=candidate)
+        elif kind == "block_save_failure":
+            _, flag_key = meta
+            actions[candidate] = _build_save_failure_action(
+                py_name=candidate, flag_state_key=flag_key
+            )
+        elif kind == "block_restore_failure":
+            _, flag_key = meta
+            actions[candidate] = _build_restore_failure_action(
+                py_name=candidate, flag_state_key=flag_key
+            )
         else:
             raise AssertionError(f"unknown task meta kind: {kind}")
 
@@ -1277,6 +1447,9 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
             state_init.setdefault(item_key, None)
             state_init.setdefault(idx_key, 0)
             state_init.setdefault(done_key, False)
+        elif meta[0] in ("block_save_failure", "block_restore_failure"):
+            _, flag_key = meta
+            state_init.setdefault(flag_key, False)
     if gather_facts:
         state_init.setdefault("gathered_facts", {})
     builder = builder.with_state(**state_init).with_entrypoint(entry)
