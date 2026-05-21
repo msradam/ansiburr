@@ -88,13 +88,13 @@ wheels = [
 
 [[package]]
 name = "ansiburr"
-version = "0.0.3"
+version = "0.0.4"
 source = { editable = "." }
 dependencies = [
     { name = "ansible-core", version = "2.19.10", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "ansible-core", version = "2.21.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "ansible-runner" },
-    { name = "burr", extra = ["tracking"] },
+    { name = "apache-burr", extra = ["tracking"] },
     { name = "pyyaml" },
 ]
 
@@ -112,7 +112,7 @@ dev = [
 requires-dist = [
     { name = "ansible-core", specifier = ">=2.16,<3" },
     { name = "ansible-runner", specifier = ">=2.4,<3" },
-    { name = "burr", extras = ["tracking"], specifier = ">=0.40.2,<0.41" },
+    { name = "apache-burr", extras = ["tracking"], specifier = ">=0.42,<0.43" },
     { name = "pyyaml", specifier = ">=6" },
 ]
 
@@ -137,6 +137,30 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/19/14/2c5dd9f512b66549ae92767a9c7b330ae88e1932ca57876909410251fe13/anyio-4.13.0.tar.gz", hash = "sha256:334b70e641fd2221c1505b3890c69882fe4a2df910cba14d97019b90b24439dc", size = 231622, upload-time = "2026-03-24T12:59:09.671Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/da/42/e921fccf5015463e32a3cf6ee7f980a6ed0f395ceeaa45060b61d86486c2/anyio-4.13.0-py3-none-any.whl", hash = "sha256:08b310f9e24a9594186fd75b4f73f4a4152069e3853f1ed8bfbf58369f4ad708", size = 114353, upload-time = "2026-03-24T12:59:08.246Z" },
+]
+
+[[package]]
+name = "apache-burr"
+version = "0.42.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/80/01/2ad49e37cb45662212cb82e13000a5daad430b7178767a4ff92293ef6e6e/apache_burr-0.42.0-py3-none-any.whl", hash = "sha256:cbcf9699e51582e64facde802345a9afcb84974199f32e9d27312fc673c90d30", size = 4707584, upload-time = "2026-05-10T03:59:28.523Z" },
+]
+
+[package.optional-dependencies]
+tracking = [
+    { name = "aiofiles" },
+    { name = "click" },
+    { name = "fastapi" },
+    { name = "fastapi-pagination" },
+    { name = "fastapi-utils" },
+    { name = "jinja2" },
+    { name = "openai" },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "requests" },
+    { name = "typing-inspect" },
+    { name = "uvicorn" },
 ]
 
 [[package]]
@@ -170,31 +194,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/86/72/cd9b395f25e290e633655a100af28cb253e4393396264a98bd5f5951d50f/backports_tarfile-1.2.0.tar.gz", hash = "sha256:d75e02c268746e1b8144c278978b6e98e85de6ad16f8e4b0844a154557eca991", size = 86406, upload-time = "2024-05-28T17:01:54.731Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b9/fa/123043af240e49752f1c4bd24da5053b6bd00cad78c2be53c0d1e8b975bc/backports.tarfile-1.2.0-py3-none-any.whl", hash = "sha256:77e284d754527b01fb1e6fa8a1afe577858ebe4e9dad8919e34c862cb399bc34", size = 30181, upload-time = "2024-05-28T17:01:53.112Z" },
-]
-
-[[package]]
-name = "burr"
-version = "0.40.2"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/1f/9c/f978b798a82eb2592c12be7ef24eb41851be33edd68395d283201719f8bf/burr-0.40.2.tar.gz", hash = "sha256:275f3e26a3deede8126c57f78e1e6a0d9940b0c89c0b8ae78ce97a3ae1e2c2a6", size = 25533834, upload-time = "2025-05-28T05:55:30.44Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/53/93/b678ae49ff67fbb2f6fdd21ca4c0ff455857ae58dc180860cc4407c2ae5e/burr-0.40.2-py3-none-any.whl", hash = "sha256:b8e790cdba5ffc61270db2ef2324d828de1a4d56d06f732d7d496d7cb053d0c7", size = 5809991, upload-time = "2025-05-28T05:55:21.387Z" },
-]
-
-[package.optional-dependencies]
-tracking = [
-    { name = "aiofiles" },
-    { name = "click" },
-    { name = "fastapi" },
-    { name = "fastapi-pagination" },
-    { name = "fastapi-utils" },
-    { name = "jinja2" },
-    { name = "openai" },
-    { name = "pydantic" },
-    { name = "pydantic-settings" },
-    { name = "requests" },
-    { name = "typing-inspect" },
-    { name = "uvicorn" },
 ]
 
 [[package]]

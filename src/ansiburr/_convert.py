@@ -94,12 +94,17 @@ _RESERVED_TASK_KEYS: frozenset[str] = frozenset(
         "diff",
         "no_log",
         "args",
+        "notify",
     }
 )
 
+# Keys handled by the flattening pass before the main converter runs over
+# the (now-flat) task list. ``include_tasks``/``import_tasks``/``block`` are
+# expanded; ``rescue``/``always`` still raise (deferred to a later release).
+_FLATTEN_TASK_KEYS: frozenset[str] = frozenset({"include_tasks", "import_tasks", "block"})
+
 _UNSUPPORTED_TASK_KEYS: frozenset[str] = frozenset(
     {
-        "block",
         "rescue",
         "always",
         "loop",
@@ -108,11 +113,8 @@ _UNSUPPORTED_TASK_KEYS: frozenset[str] = frozenset(
         "with_dict",
         "with_fileglob",
         "with_subelements",
-        "notify",
-        "import_tasks",
         "import_role",
         "include",
-        "include_tasks",
         "include_role",
     }
 )
@@ -120,7 +122,6 @@ _UNSUPPORTED_TASK_KEYS: frozenset[str] = frozenset(
 _UNSUPPORTED_PLAY_KEYS: frozenset[str] = frozenset(
     {
         "roles",
-        "handlers",
         "pre_tasks",
         "post_tasks",
         "serial",
@@ -129,6 +130,8 @@ _UNSUPPORTED_PLAY_KEYS: frozenset[str] = frozenset(
         "any_errors_fatal",
     }
 )
+
+_MAX_INCLUDE_DEPTH: int = 5
 
 
 class UnsupportedPlaybookConstruct(NotImplementedError):
@@ -150,13 +153,17 @@ def _slugify(name: str) -> str:
 
 def _module_from_task(task: Mapping[str, Any]) -> tuple[str, Any]:
     """Find the module name + args for a task. Tasks have exactly one
-    non-reserved, non-unsupported key whose value is the module's args."""
+    non-reserved, non-unsupported, non-flatten key whose value is the module's
+    args. The flatten keys (``include_tasks``, ``import_tasks``, ``block``)
+    are expanded before this function runs, so seeing one here is a converter
+    bug."""
     for key in task:
         if key in _UNSUPPORTED_TASK_KEYS:
             raise UnsupportedPlaybookConstruct(
                 f"task uses unsupported construct {key!r}: {task.get('name', task)}"
             )
-    module_keys = [k for k in task if k not in _RESERVED_TASK_KEYS]
+    excluded = _RESERVED_TASK_KEYS | _FLATTEN_TASK_KEYS
+    module_keys = [k for k in task if k not in excluded]
     if not module_keys:
         raise ValueError(f"task has no module reference: {task}")
     if len(module_keys) > 1:
@@ -175,6 +182,136 @@ def _module_from_task(task: Mapping[str, Any]) -> tuple[str, Any]:
     elif not isinstance(args, Mapping):
         raise ValueError(f"task {module!r} args must be a mapping or string; got {type(args)}")
     return module, dict(args)
+
+
+def _coerce_when_to_list(value: Any) -> list[str]:
+    """Normalize ``when:`` (string, list, or None) to a list of clause strings."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(c) for c in value]
+    return [str(value)]
+
+
+def _coerce_notify_to_list(value: Any) -> list[str]:
+    """Normalize ``notify:`` to a flat list of handler names."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(n) for n in value]
+    return [str(value)]
+
+
+def _flatten_tasks(
+    tasks: list[Any],
+    *,
+    base_dir: Path,
+    inherited_when: list[str] | None = None,
+    inherited_notify: list[str] | None = None,
+    depth: int = 0,
+) -> list[dict[str, Any]]:
+    """Recursively expand ``include_tasks``, ``import_tasks``, and ``block:``
+    into a flat list of leaf tasks.
+
+    ``inherited_when`` and ``inherited_notify`` accumulate down the recursion
+    so block-wide ``when:`` / ``notify:`` propagate to every nested leaf
+    task. The output preserves task ordering. Leaf tasks have their own
+    ``when:`` AND-merged with the inherited list and their ``notify:``
+    union-merged with the inherited list.
+
+    Static and dynamic includes (``import_tasks`` and ``include_tasks``) are
+    treated identically at conversion time: the referenced file is loaded
+    once and inlined. Jinja-templated paths raise
+    :class:`UnsupportedPlaybookConstruct` because resolving them would
+    require a per-call runtime path resolution we do not implement.
+    """
+    if depth > _MAX_INCLUDE_DEPTH:
+        raise UnsupportedPlaybookConstruct(
+            f"include/block nesting depth exceeded {_MAX_INCLUDE_DEPTH}"
+        )
+
+    inherited_when = list(inherited_when or [])
+    inherited_notify = list(inherited_notify or [])
+    flat: list[dict[str, Any]] = []
+
+    for raw_task in tasks:
+        if not isinstance(raw_task, Mapping):
+            raise ValueError(f"task is not a mapping: {raw_task!r}")
+        task: dict[str, Any] = dict(raw_task)
+
+        task_when = _coerce_when_to_list(task.get("when"))
+        combined_when = inherited_when + task_when
+
+        task_notify = _coerce_notify_to_list(task.get("notify"))
+        combined_notify = inherited_notify + task_notify
+
+        if "block" in task:
+            if "rescue" in task or "always" in task:
+                raise UnsupportedPlaybookConstruct(
+                    f"rescue:/always: are not supported; task: {task.get('name', '<unnamed>')!r}"
+                )
+            block_tasks = task["block"]
+            if not isinstance(block_tasks, list):
+                raise ValueError(f"block: must be a list, got {type(block_tasks).__name__}")
+            flat.extend(
+                _flatten_tasks(
+                    block_tasks,
+                    base_dir=base_dir,
+                    inherited_when=combined_when,
+                    inherited_notify=combined_notify,
+                    depth=depth + 1,
+                )
+            )
+            continue
+
+        include_key = next((k for k in ("include_tasks", "import_tasks") if k in task), None)
+        if include_key is not None:
+            include_value = task[include_key]
+            if isinstance(include_value, str):
+                include_rel_path = include_value
+            elif isinstance(include_value, Mapping):
+                file_value = include_value.get("file") or include_value.get("name")
+                if not file_value:
+                    raise ValueError(f"{include_key}: missing file/name")
+                include_rel_path = str(file_value)
+            else:
+                raise ValueError(f"{include_key}: unsupported shape {type(include_value).__name__}")
+
+            if "{{" in include_rel_path or "{%" in include_rel_path:
+                raise UnsupportedPlaybookConstruct(
+                    f"{include_key}: Jinja-templated paths are not supported "
+                    f"(got {include_rel_path!r})"
+                )
+
+            included_path = (base_dir / include_rel_path).resolve()
+            if not included_path.exists():
+                raise FileNotFoundError(f"{include_key}: file not found: {included_path}")
+
+            with included_path.open() as f:
+                included_tasks = yaml.safe_load(f) or []
+            if not isinstance(included_tasks, list):
+                raise ValueError(f"{include_key}: {included_path} top-level must be a list")
+
+            flat.extend(
+                _flatten_tasks(
+                    included_tasks,
+                    base_dir=included_path.parent,
+                    inherited_when=combined_when,
+                    inherited_notify=combined_notify,
+                    depth=depth + 1,
+                )
+            )
+            continue
+
+        # Leaf task. Inject the combined when/notify so the rest of the
+        # converter sees them as if the author had written them inline.
+        if combined_when:
+            task["when"] = combined_when
+        if combined_notify:
+            task["notify"] = combined_notify
+        flat.append(task)
+
+    return flat
 
 
 def _when_to_expr_string(when: str | Iterable[str]) -> str:
@@ -256,6 +393,29 @@ def _build_task_action(
     return module_action(module, register=register, become=become)(_impl)
 
 
+def _build_notify_marker(*, py_name: str, handlers: list[str]) -> Any:
+    """Build a pure-Python ``@action`` that records notify triggers.
+
+    Inserted after each task that has a ``notify:`` clause. If the preceding
+    task reported ``_last_changed=True``, the marker writes
+    ``_notified_<handler>=True`` for each handler name in the notify list.
+    Handler actions, appended at the end of the play, gate their execution
+    on these flags.
+    """
+    write_keys = [f"_notified_{h}" for h in handlers]
+
+    def _marker(state: State) -> State:
+        if state["_last_changed"]:
+            return state.update(**{f"_notified_{h}": True for h in handlers})
+        return state
+
+    # Name the underlying function before the decorator wraps it, so the
+    # resulting Burr Action reports this name in ``_last_action`` and in
+    # the tracker rather than the literal ``_marker``.
+    _marker.__name__ = py_name
+    return action(reads=["_last_changed"], writes=write_keys)(_marker)
+
+
 def from_playbook(path: str | Path, *, project: str | None = None) -> Application:
     """Parse a YAML playbook and return a runnable :class:`Application`.
 
@@ -267,6 +427,7 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
     docstring for the full list.
     """
     playbook_path = Path(path)
+    base_dir = playbook_path.resolve().parent
     with playbook_path.open() as f:
         plays = yaml.safe_load(f)
 
@@ -289,9 +450,11 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
             f"{playbook_path}: play uses unsupported keys {unsupported_play}"
         )
 
-    tasks = play.get("tasks") or []
-    if not tasks:
+    raw_tasks = play.get("tasks") or []
+    if not raw_tasks:
         raise ValueError(f"{playbook_path}: play has no tasks")
+
+    raw_handlers = play.get("handlers") or []
 
     play_vars: dict[str, Any] = dict(play.get("vars") or {})
     play_become = bool(play.get("become", False))
@@ -300,64 +463,170 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
         gather_facts = True  # Ansible default
 
     # ------------------------------------------------------------------
-    # Walk the tasks: build one action per task, with a unique name. Detect
-    # name collisions and append _2, _3, ... rather than silently merging.
-    # Done in two passes: first collect names, registers, when clauses; then
-    # build actions with the full set of register names + play vars in scope
-    # so Jinja templates inside task args can resolve at execution time.
+    # Flatten ``include_tasks``/``import_tasks`` and ``block:`` constructs
+    # into a flat list of leaf tasks. Inherited ``when:`` and ``notify:``
+    # propagate down to every nested leaf.
     # ------------------------------------------------------------------
-    py_names: list[str] = []  # parallel to tasks
+    leaf_tasks = _flatten_tasks(raw_tasks, base_dir=base_dir)
+    leaf_handlers = _flatten_tasks(raw_handlers, base_dir=base_dir)
+
+    # Map each handler's real (display) name to a slug used as the suffix
+    # for the ``_notified_<slug>`` state flag. Real names contain spaces in
+    # idiomatic Ansible ("notify: restart nginx"); the slug strips those
+    # for use in Python attribute-style state keys.
+    handler_name_to_slug: dict[str, str] = {}
+    for h in leaf_handlers:
+        name = h.get("name")
+        if not name:
+            raise ValueError("handler tasks must have a 'name'")
+        handler_name_to_slug[str(name)] = _slugify(str(name))
+
+    # Validate every notify target refers to a real handler before building
+    # anything. A typo in a playbook should fail loudly at convert time.
+    for t in leaf_tasks:
+        for n in _coerce_notify_to_list(t.get("notify")):
+            if n not in handler_name_to_slug:
+                raise UnsupportedPlaybookConstruct(
+                    f"task {t.get('name', '<unnamed>')!r} notifies unknown handler {n!r}; "
+                    f"declared handlers: {sorted(handler_name_to_slug)}"
+                )
+
+    # ------------------------------------------------------------------
+    # Build the "logical sequence" of FSM nodes: each leaf task, plus a
+    # notify-marker after any task that notifies, plus every handler at
+    # the end gated on its ``_notified_<name>`` flag. The downstream loop
+    # walks this sequence uniformly.
+    # ------------------------------------------------------------------
+    py_names: list[str] = []
     when_clauses: list[str | None] = []
     failed_when_clauses: list[str | None] = []
     ignore_errors_flags: list[bool] = []
     register_targets: list[str | None] = []
-    # Parallel list of (module, args, register, become) for the second pass.
-    task_meta: list[tuple[str, dict[str, Any], str | None, bool]] = []
-
+    # Each entry tags whether the node is a real module task or a
+    # synthesized notify-marker, and carries the per-type metadata.
+    task_meta: list[tuple] = []
     used: set[str] = set()
-    for idx, task in enumerate(tasks):
-        if not isinstance(task, Mapping):
-            raise ValueError(f"task #{idx} is not a mapping: {task!r}")
-        raw_name = task.get("name") or f"task_{idx + 1}"
-        py = _slugify(raw_name)
-        # de-collide
-        candidate = py
+
+    def _unique(base: str) -> str:
+        candidate = base
         n = 1
         while candidate in used:
             n += 1
-            candidate = f"{py}_{n}"
+            candidate = f"{base}_{n}"
         used.add(candidate)
-        py_names.append(candidate)
+        return candidate
 
+    def _record(
+        *,
+        py_name: str,
+        when_clause: str | None,
+        failed_when_clause: str | None,
+        ignore_errors: bool,
+        register: str | None,
+        meta: tuple,
+    ) -> None:
+        py_names.append(py_name)
+        when_clauses.append(when_clause)
+        failed_when_clauses.append(failed_when_clause)
+        ignore_errors_flags.append(ignore_errors)
+        register_targets.append(register)
+        task_meta.append(meta)
+
+    notified_handlers_seen: set[str] = set()
+    for idx, task in enumerate(leaf_tasks):
+        raw_name = task.get("name") or f"task_{idx + 1}"
+        py = _unique(_slugify(raw_name))
         module, args = _module_from_task(task)
         register = task.get("register")
-        register_targets.append(register)
         become = bool(task.get("become", play_become))
-        task_meta.append((module, args, register, become))
-
         when = task.get("when")
-        when_clauses.append(_when_to_expr_string(when) if when is not None else None)
         fw = task.get("failed_when")
-        failed_when_clauses.append(_when_to_expr_string(fw) if fw is not None else None)
-        ignore_errors_flags.append(bool(task.get("ignore_errors", False)))
+        _record(
+            py_name=py,
+            when_clause=_when_to_expr_string(when) if when is not None else None,
+            failed_when_clause=_when_to_expr_string(fw) if fw is not None else None,
+            ignore_errors=bool(task.get("ignore_errors", False)),
+            register=register,
+            meta=("module", module, args, register, become),
+        )
+
+        notify_list = _coerce_notify_to_list(task.get("notify"))
+        if notify_list:
+            # Dedupe handlers but preserve order so the marker writes flags
+            # in the order the playbook listed. The marker tracks the
+            # *slugified* handler names so the resulting state keys are
+            # valid Python identifiers (``_notified_say_hello`` rather than
+            # ``_notified_say hello``).
+            seen: dict[str, None] = {}
+            for handler in notify_list:
+                slug = handler_name_to_slug[handler]
+                seen.setdefault(slug, None)
+            marker_handlers = list(seen)
+            notified_handlers_seen.update(marker_handlers)
+            marker_name = _unique(f"_notify_{py}")
+            _record(
+                py_name=marker_name,
+                when_clause=None,
+                failed_when_clause=None,
+                ignore_errors=True,
+                register=None,
+                meta=("notify_marker", marker_handlers),
+            )
+
+    # Append handlers in declaration order, gated on _notified_<slug>.
+    for idx, handler_task in enumerate(leaf_handlers):
+        handler_real_name = str(handler_task.get("name") or f"handler_{idx + 1}")
+        handler_slug = handler_name_to_slug[handler_real_name]
+        # Skip handlers nobody notifies; keeps the graph tight.
+        if handler_slug not in notified_handlers_seen:
+            continue
+        py = _unique(_slugify(f"handler_{handler_real_name}"))
+        module, args = _module_from_task(handler_task)
+        register = handler_task.get("register")
+        become = bool(handler_task.get("become", play_become))
+        when_user = handler_task.get("when")
+        gate = f"_notified_{handler_slug}"
+        if when_user is not None:
+            when_combined = f"({_when_to_expr_string(when_user)}) and {gate}"
+        else:
+            when_combined = gate
+        fw = handler_task.get("failed_when")
+        _record(
+            py_name=py,
+            when_clause=when_combined,
+            failed_when_clause=_when_to_expr_string(fw) if fw is not None else None,
+            # Handler failures by default propagate; Ansible's --force-handlers
+            # behavior is out of scope here.
+            ignore_errors=bool(handler_task.get("ignore_errors", False)),
+            register=register,
+            meta=("module", module, args, register, become),
+        )
 
     known_registers: set[str] = {r for r in register_targets if r}
 
     actions: dict[str, Any] = {}
-    for candidate, (module, args, register, become) in zip(py_names, task_meta, strict=True):
-        actions[candidate] = _build_task_action(
-            py_name=candidate,
-            module=module,
-            args=args,
-            register=register,
-            become=become,
-            known_registers=known_registers,
-            play_vars=play_vars,
-        )
+    for candidate, meta in zip(py_names, task_meta, strict=True):
+        kind = meta[0]
+        if kind == "module":
+            _, module, args, register, become = meta
+            actions[candidate] = _build_task_action(
+                py_name=candidate,
+                module=module,
+                args=args,
+                register=register,
+                become=become,
+                known_registers=known_registers,
+                play_vars=play_vars,
+            )
+        elif kind == "notify_marker":
+            _, handlers = meta
+            actions[candidate] = _build_notify_marker(py_name=candidate, handlers=handlers)
+        else:
+            raise AssertionError(f"unknown task meta kind: {kind}")
 
     # Translate Jinja-style attribute access on registered names into the
     # bracket access Python's eval expects. ``known_registers`` was assembled
-    # in the first pass over the tasks.
+    # while walking the logical sequence.
     when_clauses = [
         _translate_register_dot_access(c, known_registers) if c is not None else None
         for c in when_clauses
@@ -423,22 +692,34 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
             failure_predicate = failed_when_clauses[i] or "_last_failed"
             transitions.append((current, "escalate", expr(failure_predicate)))
 
-        # ``when:`` skip behavior: if the next task carries a ``when:`` whose
-        # predicate evaluates to False at this point in the run, advance past
-        # it directly to the task after. v1 implements single-level skip;
-        # consecutive skipped tasks aren't chained.
-        if i + 1 < len(py_names) and when_clauses[i + 1] is not None:
-            next_when = when_clauses[i + 1]
-            skip_target = py_names[i + 2] if i + 2 < len(py_names) else "done"
-            transitions.append((current, skip_target, expr(f"not ({next_when})")))
+        # ``when:`` skip behavior with chained skip. For each k>=1, if the
+        # next k tasks ALL carry a ``when:`` that evaluates false, jump
+        # past all of them to task[i+k+1] (or to ``done``). Longest skip
+        # is emitted first so Burr's in-declaration-order condition match
+        # picks the deepest skip when multiple are satisfied. This matters
+        # for handler chains, where consecutive unnotified handlers all
+        # need to be skipped together.
+        skip_transitions: list[tuple] = []
+        accumulated: list[str] = []
+        j = i + 1
+        while j < len(py_names) and when_clauses[j] is not None:
+            accumulated.append(when_clauses[j])  # type: ignore[arg-type]
+            skip_target = py_names[j + 1] if j + 1 < len(py_names) else "done"
+            condition = " and ".join(f"not ({c})" for c in accumulated)
+            skip_transitions.append((current, skip_target, expr(condition)))
+            j += 1
+        # Longest skip first so Burr's in-declaration-order matching picks
+        # the deepest applicable skip when several conditions are satisfied.
+        transitions.extend(reversed(skip_transitions))
+
         transitions.append((current, nxt))
 
     # ------------------------------------------------------------------
     # Build the Application.
     # ------------------------------------------------------------------
     builder: ApplicationBuilder = ApplicationBuilder().with_actions(**actions)
-    for t in transitions:
-        builder = builder.with_transitions(t)
+    for transition_tuple in transitions:
+        builder = builder.with_transitions(transition_tuple)
 
     state_init: dict[str, Any] = {
         **initial_sentinels(),
@@ -450,6 +731,10 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
     for reg in register_targets:
         if reg and reg not in state_init:
             state_init[reg] = {}
+    # Pre-seed notify flags so handler when:-gates can be evaluated before
+    # any task has had a chance to flip them.
+    for handler_name in notified_handlers_seen:
+        state_init.setdefault(f"_notified_{handler_name}", False)
     if gather_facts:
         state_init.setdefault("gathered_facts", {})
     builder = builder.with_state(**state_init).with_entrypoint(entry)

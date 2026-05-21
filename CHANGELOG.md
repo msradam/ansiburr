@@ -6,6 +6,49 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.4] - 2026-05-21
+
+The converter now ingests the constructs every popular community Ansible
+role opens with (OS-conditional ``include_tasks``, ``block:`` grouping,
+``notify:`` + handlers). Without this, ``from_playbook`` could not convert
+realistic third-party playbooks.
+
+### Changed
+
+- Burr dependency migrated from the pre-incubator ``burr[tracking]`` to
+  ``apache-burr[tracking]>=0.42,<0.43``. The upstream project graduated to
+  Apache incubation and renamed its PyPI distribution; the internal
+  ``burr.core`` and ``burr.tracking`` import paths are unchanged. Fresh
+  ``pip install ansiburr`` was previously stranded on the pre-rename
+  package.
+
+### Added
+
+- Converter: ``block:`` (group-only) lowers into inline tasks with the
+  block's ``when:`` AND-propagated to every inner task. ``rescue:`` /
+  ``always:`` still raise ``UnsupportedPlaybookConstruct`` (deferred to a
+  later release as STRATUS-style undo/transactional edges).
+- Converter: ``include_tasks:`` and ``import_tasks:`` with a literal
+  filesystem path inline the referenced file's tasks at conversion time.
+  Outer ``when:`` and ``notify:`` propagate down to every included leaf.
+  Jinja-templated paths are not yet supported.
+- Converter: ``notify:`` + ``handlers:`` round-trip end-to-end. Each
+  notifying task gets a synthesized notify-marker action that flips a
+  ``_notified_<slug>`` state flag when ``_last_changed`` is true. Handlers
+  are appended after the main tasks and gated on their flag. Notify
+  references to unknown handlers raise at convert time.
+- Converter: chained ``when:`` skip transitions. Consecutive tasks whose
+  ``when:`` evaluates false are skipped together rather than only the
+  immediate next one. Matters for handler chains with multiple unnotified
+  handlers.
+
+### Tests
+
+- Fixtures and tests added for the four new converter features. Updated
+  ``test_unsupported_block_raises`` to ``test_block_with_rescue_still_raises``
+  (block alone is now supported; ``rescue:``/``always:`` still rejected).
+- Total suite: 40 tests, all green.
+
 ## [0.0.3] - 2026-05-21
 
 ### Added
@@ -118,4 +161,5 @@ Initial alpha release.
 [0.0.1]: https://github.com/msradam/ansiburr/releases/tag/v0.0.1
 [0.0.2]: https://github.com/msradam/ansiburr/releases/tag/v0.0.2
 [0.0.3]: https://github.com/msradam/ansiburr/releases/tag/v0.0.3
-[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.3...HEAD
+[0.0.4]: https://github.com/msradam/ansiburr/releases/tag/v0.0.4
+[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.4...HEAD

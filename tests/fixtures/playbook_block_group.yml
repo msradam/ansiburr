@@ -1,11 +1,10 @@
-- name: bad
+- name: block group
   hosts: localhost
   gather_facts: no
   tasks:
-    - name: try
+    - name: wrap
       block:
-        - name: inner
+        - name: first inner
           ansible.builtin.ping:
-      rescue:
-        - name: recover
+        - name: second inner
           ansible.builtin.ping:
