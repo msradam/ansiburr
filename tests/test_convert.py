@@ -53,6 +53,29 @@ def test_jinja_templated_loop_still_raises() -> None:
         ansiburr.from_playbook(FIXTURES / "playbook_unsupported_loop.yml")
 
 
+def test_set_fact_writes_into_state_and_jinja_resolves_downstream() -> None:
+    """``set_fact:`` lowers to a pure-Python state update, and a downstream
+    ``set_fact:`` that templates the freshly-written value resolves it from
+    Burr state. Validates that fact-set values propagate across tasks."""
+    app = ansiburr.from_playbook(FIXTURES / "playbook_set_fact.yml")
+    last, _, final = app.run(halt_after=["done", "escalate"])
+    assert last.name == "done"
+    assert final["greeting"] == "hello"
+    assert final["target"] == "world"
+    assert final["composed"] == "hello, world!"
+
+
+def test_changed_when_false_suppresses_change_signal() -> None:
+    """``changed_when: false`` must force ``_last_changed=False`` even when
+    the underlying module reports changed. This is the standard idiom for
+    read-only command/shell tasks."""
+    app = ansiburr.from_playbook(FIXTURES / "playbook_changed_when.yml")
+    _, _, final = app.run(halt_after=["done", "escalate"])
+    assert final["_last_changed"] is False
+    # The register still landed; only the changed signal was overridden.
+    assert final["probe"]["rc"] == 0
+
+
 def test_literal_loop_visits_each_item_in_order() -> None:
     """A ``loop:`` with a literal list lowers to a three-action sub-FSM:
     init -> task -> advance, with a back-edge from advance to task until

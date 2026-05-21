@@ -6,6 +6,35 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.7] - 2026-05-21
+
+### Added
+
+- Converter: ``set_fact:`` is lowered to a pure-Python state-update
+  action rather than handed to ansible-runner. Each task in the converter
+  runs in its own play, so a normal Ansible set_fact would not propagate
+  across tasks. The new lowering renders each arg value's Jinja against
+  current Burr state and writes the result to state, so
+  ``set_fact: composed: "{{ greeting }}, {{ target }}!"`` works as
+  authored.
+- Converter: ``changed_when:`` (string predicate or YAML bool) is honored
+  via a post-action that re-evaluates ``_last_changed`` against state.
+  Standard idioms (``changed_when: false`` on a read-only command,
+  ``changed_when: result.rc != 0`` for a custom predicate) now do the
+  right thing in the converted FSM.
+- Jinja rendering in task arguments and set_fact values now sees every
+  non-internal state key (set_fact-written, gather_facts-derived,
+  play_vars-seeded), not just registered values. Subsequent task args
+  can reference set_fact values as if they were facts in a single play.
+- ``_when_to_expr_string`` accepts YAML booleans (``changed_when: false``
+  parses as Python ``False``) and produces the matching Python literal.
+
+### Tests
+
+- Two new positive tests: set_fact chain (``greeting`` + ``target`` ->
+  ``composed``) and ``changed_when: false`` forcing
+  ``_last_changed=False`` on a successful command.
+
 ## [0.0.6] - 2026-05-21
 
 ### Added
@@ -221,4 +250,5 @@ Initial alpha release.
 [0.0.4]: https://github.com/msradam/ansiburr/releases/tag/v0.0.4
 [0.0.5]: https://github.com/msradam/ansiburr/releases/tag/v0.0.5
 [0.0.6]: https://github.com/msradam/ansiburr/releases/tag/v0.0.6
-[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.6...HEAD
+[0.0.7]: https://github.com/msradam/ansiburr/releases/tag/v0.0.7
+[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.7...HEAD

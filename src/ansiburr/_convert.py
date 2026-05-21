@@ -341,9 +341,14 @@ def _flatten_tasks(
     return flat
 
 
-def _when_to_expr_string(when: str | Iterable[str]) -> str:
-    """Lower Ansible ``when:`` (string or list of strings) to a single Python
-    expression. A list is AND-joined with parentheses around each clause."""
+def _when_to_expr_string(when: Any) -> str:
+    """Lower Ansible ``when:`` / ``changed_when:`` / ``failed_when:``
+    (string, list of strings, or YAML-typed bool) into a single Python
+    expression. A list is AND-joined with parentheses around each clause.
+    YAML booleans (``changed_when: false``) become the matching Python
+    literal."""
+    if isinstance(when, bool):
+        return "True" if when else "False"
     if isinstance(when, str):
         return when
     clauses = [str(c) for c in when]
@@ -410,11 +415,21 @@ def _build_task_action(
     pinned_vars = dict(play_vars)
 
     def _impl(state: State) -> dict[str, Any]:
+        # Build the Jinja context from play vars, all registered values
+        # currently in state, plus any other non-internal state field (so
+        # set_fact-written variables resolve in subsequent tasks).
+        # Internal sentinels (``_last_*``, ``_loop_*``, ``_notified_*``)
+        # are skipped to avoid leaking ansiburr's bookkeeping into user
+        # template namespaces.
         context: dict[str, Any] = {**pinned_vars}
         state_dict = state.get_all()
         for name in register_names:
             if name in state_dict:
                 context[name] = state_dict[name]
+        for key, value in state_dict.items():
+            if key.startswith("_"):
+                continue
+            context.setdefault(key, value)
         if loop_item_state_key is not None and loop_item_state_key in state_dict:
             # Match Ansible's variable name so playbook authors write
             # ``{{ item }}`` and ``{{ item.name }}`` as they would in any
@@ -499,6 +514,80 @@ def _build_loop_advance(
 
     _impl.__name__ = py_name
     return action(reads=reads, writes=writes)(_impl)
+
+
+_SET_FACT_MODULES: frozenset[str] = frozenset({"set_fact", "ansible.builtin.set_fact"})
+
+
+def _build_set_fact_action(
+    *,
+    py_name: str,
+    args: Mapping[str, Any],
+    known_registers: Iterable[str],
+    play_vars: Mapping[str, Any],
+) -> Any:
+    """Build a pure-Python action that mirrors Ansible's ``set_fact:``.
+
+    Each key in ``args`` becomes a state field. Values containing Jinja
+    templates are rendered against play vars plus any registered values
+    visible in current state, so ``set_fact: total: "{{ a + b }}"`` works
+    the way it would inside one Ansible play (even though our converter
+    runs each task in its own play and would otherwise drop the new fact).
+    """
+    register_names = list(known_registers)
+    pinned_vars = dict(play_vars)
+    writes = list(args.keys())
+
+    def _impl(state: State) -> State:
+        context: dict[str, Any] = {**pinned_vars}
+        state_dict = state.get_all()
+        for name in register_names:
+            if name in state_dict:
+                context[name] = state_dict[name]
+        for key, value in state_dict.items():
+            if key.startswith("_"):
+                continue
+            context.setdefault(key, value)
+        rendered = _render_jinja(dict(args), context)
+        return state.update(**rendered)
+
+    _impl.__name__ = py_name
+    return action(reads=[], writes=writes)(_impl)
+
+
+def _build_changed_when_post(
+    *,
+    py_name: str,
+    expression: str,
+    known_registers: Iterable[str],
+) -> Any:
+    """Build a pure-Python action that re-evaluates ``_last_changed`` per
+    the task's ``changed_when:`` expression.
+
+    Ansible's ``changed_when: false`` (and predicates like
+    ``changed_when: result.rc != 0``) override the module's idea of
+    whether anything changed. Inserted immediately after a task whose YAML
+    sets ``changed_when:``. Reads the same Burr state Burr's expr() reads
+    so the predicate has access to registered values.
+    """
+    # Translate Jinja-style attribute access on registered names to bracket
+    # access so Python's ``eval`` can evaluate it. Same transformation the
+    # ``when:`` lowering uses elsewhere in the converter.
+    translated = _translate_register_dot_access(expression, known_registers)
+
+    def _impl(state: State) -> State:
+        state_dict = state.get_all()
+        try:
+            value = bool(eval(translated, {"__builtins__": {}}, dict(state_dict)))
+        except Exception:
+            # If the expression can't evaluate (e.g. references a register
+            # the upstream task didn't populate), be conservative: don't
+            # flip changed.
+            value = bool(state_dict.get("_last_changed"))
+        return state.update(_last_changed=value)
+
+    _impl.__name__ = py_name
+    return action(reads=["_last_changed"], writes=["_last_changed"])(_impl)
 
 
 def _build_notify_marker(*, py_name: str, handlers: list[str]) -> Any:
@@ -720,6 +809,25 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
         become = bool(task.get("become", play_become))
         when = task.get("when")
         fw = task.get("failed_when")
+        cw = task.get("changed_when")
+
+        # ``set_fact:`` is lowered to a pure-Python state-update action
+        # rather than handed to ansible-runner, because each converter task
+        # runs in its own play and Ansible's fact propagation across plays
+        # is unreliable. The arg dict's values are Jinja-rendered against
+        # current state, so ``set_fact: total: "{{ a + b }}"`` works as
+        # authored.
+        if module in _SET_FACT_MODULES:
+            _record(
+                py_name=py,
+                when_clause=_when_to_expr_string(when) if when is not None else None,
+                failed_when_clause=None,
+                ignore_errors=True,
+                register=None,
+                meta=("set_fact", args),
+            )
+            continue
+
         _record(
             py_name=py,
             when_clause=_when_to_expr_string(when) if when is not None else None,
@@ -728,6 +836,22 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
             register=register,
             meta=("module", module, args, register, become),
         )
+
+        # ``changed_when:`` overrides Ansible's idea of whether the task
+        # changed anything (``changed_when: false`` for a read-only command,
+        # ``changed_when: result.rc != 0`` for a custom predicate). Insert
+        # a tiny post-action that re-evaluates _last_changed against state.
+        if cw is not None:
+            cw_expr = _when_to_expr_string(cw)
+            post_name = _unique(f"_changed_when_{py}")
+            _record(
+                py_name=post_name,
+                when_clause=None,
+                failed_when_clause=None,
+                ignore_errors=True,
+                register=None,
+                meta=("changed_when_post", cw_expr),
+            )
 
         notify_list = _coerce_notify_to_list(task.get("notify"))
         if notify_list:
@@ -825,6 +949,21 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
                 item_state_key=item_key,
                 idx_state_key=idx_key,
                 done_state_key=done_key,
+            )
+        elif kind == "set_fact":
+            _, set_fact_args = meta
+            actions[candidate] = _build_set_fact_action(
+                py_name=candidate,
+                args=set_fact_args,
+                known_registers=known_registers,
+                play_vars=play_vars,
+            )
+        elif kind == "changed_when_post":
+            _, cw_expr = meta
+            actions[candidate] = _build_changed_when_post(
+                py_name=candidate,
+                expression=cw_expr,
+                known_registers=known_registers,
             )
         else:
             raise AssertionError(f"unknown task meta kind: {kind}")
