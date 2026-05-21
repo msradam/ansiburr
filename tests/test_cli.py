@@ -139,13 +139,14 @@ def test_lint_reports_unsupported_construct(tmp_path: Path) -> None:
         "- name: bad\n"
         "  hosts: localhost\n"
         "  gather_facts: no\n"
-        "  roles:\n"
-        "    - some-role\n"
+        "  strategy: free\n"
+        "  tasks:\n"
+        "    - ansible.builtin.ping:\n"
     )
     code, output = _run(["lint", str(bad)])
     assert code == 1
     assert "REJECTED" in output
-    assert "roles" in output
+    assert "strategy" in output
 
 
 def test_lint_refuses_python_file(tmp_path: Path) -> None:

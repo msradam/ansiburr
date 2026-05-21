@@ -39,6 +39,28 @@ def test_register_capture_lands_in_state() -> None:
     assert ping.get("ping") == "pong"
 
 
+def test_play_with_roles_inlines_role_tasks_and_vars() -> None:
+    """``roles: - myrole`` resolves ``roles/myrole/{tasks,vars,defaults,
+    handlers}/main.yml`` next to the playbook, inlines role tasks before
+    the play's own tasks, and merges vars (defaults < role vars <
+    play vars)."""
+    app = ansiburr.from_playbook(FIXTURES / "playbook_with_role.yml")
+    last, _, final = app.run(halt_after=["done", "escalate"])
+    assert last.name == "done"
+    # Role tasks ran (set_fact in the role flipped myrole_ran).
+    assert final["myrole_ran"] is True
+    # vars/main.yml ("world") overrode defaults/main.yml ("default-fallback").
+    assert final["myrole_who"] == "world"
+    # Defaults still surface for keys the role's vars don't override.
+    assert final["myrole_extra"] == "from-defaults"
+    # The play's own task (`after role`) ran AFTER the role's tasks, so
+    # it saw the role's state.
+    assert final["post"] == "myrole_ran=True extra=from-defaults"
+    # Role tasks appear at the START of the action list, before play tasks.
+    names = [a.name for a in app.graph.actions]
+    assert names.index("role_greet") < names.index("after_role")
+
+
 def test_to_playbook_round_trips() -> None:
     """``to_playbook(from_playbook(p))`` produces a valid YAML that
     re-parses to the same play structure."""
@@ -273,8 +295,11 @@ def test_literal_loop_visits_each_item_in_order() -> None:
     assert "greet_each_loop_advance" in action_names
 
 
-def test_unsupported_roles_raises() -> None:
-    with pytest.raises(ansiburr.UnsupportedPlaybookConstruct, match="roles"):
+def test_unsupported_strategy_raises() -> None:
+    """``roles:`` is now supported; ``strategy:`` (and ``serial:`` /
+    ``pre_tasks:`` / etc.) still raise as parallelism/phase keywords
+    that ansiburr fundamentally doesn't model."""
+    with pytest.raises(ansiburr.UnsupportedPlaybookConstruct, match="strategy"):
         ansiburr.from_playbook(FIXTURES / "playbook_unsupported_roles.yml")
 
 

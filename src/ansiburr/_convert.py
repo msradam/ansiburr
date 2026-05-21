@@ -161,7 +161,9 @@ _UNSUPPORTED_TASK_KEYS: frozenset[str] = frozenset(
 
 _UNSUPPORTED_PLAY_KEYS: frozenset[str] = frozenset(
     {
-        "roles",
+        # ``roles:`` is now lowered (see ``_inline_roles_into_play``); the
+        # remaining play-level keys still require parallelism or pre/post
+        # task semantics we don't model.
         "pre_tasks",
         "post_tasks",
         "serial",
@@ -943,6 +945,145 @@ def _build_first_found_include_vars_action(
     return action(reads=[], writes=declared_writes)(_impl)
 
 
+def _resolve_role_dir(role_name: str, base_dir: Path) -> Path:
+    """Find a role's directory given its name.
+
+    Searches in (1) ``<base_dir>/roles/<role>``, (2) ``<base_dir>/../roles/<role>``,
+    and finally treats ``base_dir / role`` as a fallback. This handles both
+    playbook-local roles (the conventional layout) and roles a level up
+    when the playbook lives inside ``playbooks/``.
+
+    Galaxy-style global paths (``~/.ansible/roles``, ``ANSIBLE_ROLES_PATH``)
+    are not searched yet; teams using vendored roles should keep them under
+    ``<playbook_dir>/roles/``.
+    """
+    candidates = [
+        base_dir / "roles" / role_name,
+        base_dir.parent / "roles" / role_name,
+        base_dir / role_name,
+    ]
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+    raise FileNotFoundError(
+        f"role {role_name!r}: directory not found under any of "
+        f"{[str(c) for c in candidates]}"
+    )
+
+
+def _load_role_yaml(role_dir: Path, sub_path: str) -> Any:
+    """Read a role-relative YAML file (e.g. ``tasks/main.yml``) and return
+    its parsed contents, or ``None`` if the file does not exist."""
+    p = role_dir / sub_path
+    if not p.exists():
+        return None
+    return yaml.safe_load(p.read_text())
+
+
+def _inline_roles_into_play(play: dict[str, Any], base_dir: Path) -> dict[str, Any]:
+    """Expand a play's ``roles:`` into inline tasks, handlers, and vars.
+
+    Each role entry can be a string (the role name) or a dict shaped like
+    ``{role: name, when: cond, vars: {...}}``. For each, we read:
+
+    - ``tasks/main.yml`` -> prepended to the play's ``tasks:`` so role tasks
+      execute before the play's own tasks (matches Ansible's order)
+    - ``handlers/main.yml`` -> appended to the play's ``handlers:``
+    - ``defaults/main.yml`` -> set into play vars at low priority
+    - ``vars/main.yml`` -> set into play vars at higher priority
+
+    The ``when:`` from a dict-form role entry is propagated to every task
+    in that role via the existing ``when:`` inheritance pathway.
+
+    Returns a new play dict with ``roles`` removed and ``tasks``/
+    ``handlers``/``vars`` extended. Mutating the original play would be
+    surprising for callers reading the playbook for other reasons.
+    """
+    roles_value = play.get("roles")
+    if not roles_value:
+        # No-op: makes the caller's branch simpler.
+        return dict(play)
+
+    if not isinstance(roles_value, list):
+        raise ValueError(
+            f"roles: must be a list, got {type(roles_value).__name__}"
+        )
+
+    role_tasks: list[Any] = []
+    role_handlers: list[Any] = []
+    accumulated_defaults: dict[str, Any] = {}
+    accumulated_vars: dict[str, Any] = {}
+
+    for entry in roles_value:
+        if isinstance(entry, str):
+            role_name = entry
+            role_when: list[str] = []
+        elif isinstance(entry, Mapping):
+            raw_role = entry.get("role") or entry.get("name")
+            if not raw_role:
+                raise ValueError(
+                    f"role entry {entry!r}: missing ``role:`` / ``name:`` field"
+                )
+            role_name = str(raw_role)
+            role_when = _coerce_when_to_list(entry.get("when"))
+        else:
+            raise ValueError(
+                f"role entry {entry!r}: expected a string or mapping, got {type(entry).__name__}"
+            )
+
+        role_dir = _resolve_role_dir(role_name, base_dir)
+
+        defaults = _load_role_yaml(role_dir, "defaults/main.yml")
+        if isinstance(defaults, Mapping):
+            accumulated_defaults.update(defaults)
+        role_vars = _load_role_yaml(role_dir, "vars/main.yml")
+        if isinstance(role_vars, Mapping):
+            accumulated_vars.update(role_vars)
+
+        tasks_for_role = _load_role_yaml(role_dir, "tasks/main.yml") or []
+        if not isinstance(tasks_for_role, list):
+            raise ValueError(
+                f"role {role_name!r}: tasks/main.yml must be a list of tasks"
+            )
+        # The role-entry ``when:`` propagates to every task in the role.
+        if role_when:
+            if len(role_when) > 1:
+                combined = " and ".join(f"({c})" for c in role_when)
+            else:
+                combined = role_when[0]
+            for t in tasks_for_role:
+                if not isinstance(t, Mapping):
+                    continue
+                existing_when = t.get("when")
+                if existing_when is None:
+                    t["when"] = combined  # type: ignore[index]
+                elif isinstance(existing_when, list):
+                    t["when"] = [*existing_when, combined]  # type: ignore[index]
+                else:
+                    t["when"] = f"({existing_when}) and ({combined})"  # type: ignore[index]
+        role_tasks.extend(tasks_for_role)
+
+        handlers_for_role = _load_role_yaml(role_dir, "handlers/main.yml") or []
+        if not isinstance(handlers_for_role, list):
+            raise ValueError(
+                f"role {role_name!r}: handlers/main.yml must be a list"
+            )
+        role_handlers.extend(handlers_for_role)
+
+    out: dict[str, Any] = play.copy()
+    # Roles run before tasks; defaults sit under vars (lower priority).
+    out.pop("roles", None)
+    # Priority: defaults < role vars < play vars.
+    merged_vars = accumulated_defaults | accumulated_vars | dict(play.get("vars") or {})
+    if merged_vars:
+        out["vars"] = merged_vars
+    existing_tasks = play.get("tasks") or []
+    out["tasks"] = role_tasks + list(existing_tasks)
+    existing_handlers = play.get("handlers") or []
+    out["handlers"] = role_handlers + list(existing_handlers)
+    return out
+
+
 def _scan_yaml_keys_in_paths(base_dir: Path, paths: list[str]) -> list[str]:
     """Scan every ``*.yml`` / ``*.yaml`` file under the given path prefixes
     and return the union of their top-level keys. Used to pre-declare the
@@ -1209,6 +1350,13 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
     play = plays[0]
     if not isinstance(play, Mapping):
         raise ValueError(f"{playbook_path}: play must be a mapping; got {type(play)}")
+
+    # Inline ``roles:`` before the unsupported-key check, since this expansion
+    # produces a play without the ``roles`` key. Role tasks are prepended to
+    # the play's own tasks; role handlers append; role vars merge in.
+    if "roles" in play:
+        play_copy = play.copy() if isinstance(play, dict) else dict(play)
+        play = _inline_roles_into_play(play_copy, base_dir)
 
     unsupported_play = [k for k in play if k in _UNSUPPORTED_PLAY_KEYS]
     if unsupported_play:
