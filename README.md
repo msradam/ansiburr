@@ -79,9 +79,59 @@ From there, the moves are:
 - Use `host.gather_facts()` to expand `ansible_facts` into top-level state keys (`ansible_pkg_mgr`, `ansible_os_family`, etc.) and branch transitions on them.
 - Use `wait_until()` for polling sub-graphs where each attempt is a discrete trace step.
 - Use `check_mode=True` + `diff=True` for plan-then-apply patterns with a deterministic review gate.
-- Use `from_playbook("path/to/playbook.yml")` to lift an existing YAML playbook into an `Application` directly.
 
 Working examples of each are in [`examples/`](./examples/).
+
+## From an existing playbook
+
+If you already have an Ansible playbook, `from_playbook(...)` lifts it into a runnable Burr `Application` without rewriting the YAML. The full demo lives in [`examples/from_playbook/`](./examples/from_playbook/); here's the shape:
+
+```yaml
+# playbook.yml
+- name: tool availability check
+  hosts: localhost
+  gather_facts: no
+
+  tasks:
+    - name: check for git
+      ansible.builtin.command:
+        cmd: git --version
+      register: git_check
+      ignore_errors: yes
+      changed_when: false
+
+    - name: report git availability
+      ansible.builtin.debug:
+        msg: "git is installed: {{ git_check.stdout }}"
+      when: git_check.rc == 0
+
+    - name: check for jq
+      ansible.builtin.command:
+        cmd: jq --version
+      register: jq_check
+      ignore_errors: yes
+      changed_when: false
+```
+
+```python
+# run.py
+import ansiburr
+
+app = ansiburr.from_playbook("playbook.yml")
+last_action, _, final = app.run(halt_after=["done", "escalate"])
+
+print(f"git: rc={final['git_check']['rc']} {final['git_check'].get('stdout', '').strip()}")
+print(f"jq:  rc={final['jq_check']['rc']}  {final['jq_check'].get('stdout', '').strip()}")
+```
+
+Output (when both binaries are present):
+
+```
+git: rc=0 git version 2.50.1 (Apple Git-155)
+jq:  rc=0  jq-1.7.1-apple
+```
+
+The converter supports flat tasks with `name`, `when:`, `register:`, `failed_when:`, `ignore_errors:`, `become:`, `gather_facts:`, and play-level `vars:`. Jinja2 `{{ ... }}` references to registered values are rendered using Burr state before each task runs. Unsupported playbook constructs (`block`, `loop`, `notify`, `roles`, multi-play files) raise `UnsupportedPlaybookConstruct` at conversion time with the offending node named in the message, so a partially-converted FSM never starts. From here you can hand-edit the resulting Application — add transitions, swap actions, wire in policy gates — or keep using the playbook as the source of truth and re-convert.
 
 ## Demo corpus
 

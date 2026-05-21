@@ -45,10 +45,36 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
+import jinja2
 import yaml
 from burr.core import Application, ApplicationBuilder, State, action, expr
 
 from ansiburr._action import initial_sentinels, module_action
+
+# Permissive Jinja: undefined references become empty strings rather than
+# raising. Matches Ansible's default behavior closer than StrictUndefined
+# would, and keeps the FSM advancing even when an upstream task hasn't
+# populated the referenced register yet (e.g. when ``when:`` skipped it).
+_JINJA_ENV = jinja2.Environment(
+    undefined=jinja2.ChainableUndefined,
+    autoescape=False,
+)
+
+
+def _render_jinja(value: Any, context: Mapping[str, Any]) -> Any:
+    """Walk a Python value, rendering Jinja2 templates inside any strings
+    using ``context``. Non-string leaves are returned as-is. Dicts and lists
+    recurse."""
+    if isinstance(value, str):
+        if "{{" not in value and "{%" not in value:
+            return value
+        return _JINJA_ENV.from_string(value).render(**context)
+    if isinstance(value, Mapping):
+        return {k: _render_jinja(v, context) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_render_jinja(v, context) for v in value]
+    return value
+
 
 _RESERVED_TASK_KEYS: frozenset[str] = frozenset(
     {
@@ -164,6 +190,33 @@ def _when_to_expr_string(when: str | Iterable[str]) -> str:
     return " and ".join(f"({c})" for c in clauses)
 
 
+def _translate_register_dot_access(expr_text: str, registers: Iterable[str]) -> str:
+    """Translate ``register.attr.attr2`` to ``register["attr"]["attr2"]`` for
+    every registered name.
+
+    Ansible's ``when:`` and ``failed_when:`` expressions use Jinja-style
+    attribute access on registered results (``result.rc == 0``). Burr's
+    ``expr()`` uses Python ``eval``, and Python dicts don't support attribute
+    access. This rewriter converts the simple case (chained ``.attr`` on a
+    bare register name) to bracket access. More complex Jinja syntax
+    (filters, ``is defined`` tests) is left as-is and will fail at expression
+    evaluation time with a Python error pointing at the unsupported feature.
+    """
+    register_set = set(registers)
+    if not register_set:
+        return expr_text
+    # Match: word-boundary register name + one or more ``.attr`` accesses.
+    name_alt = "|".join(re.escape(r) for r in register_set)
+    pattern = re.compile(rf"\b(?P<name>{name_alt})(?P<chain>(?:\.[A-Za-z_]\w*)+)\b")
+
+    def _rewrite(match: re.Match[str]) -> str:
+        name = match.group("name")
+        attrs = match.group("chain").lstrip(".").split(".")
+        return name + "".join(f"[{attr!r}]" for attr in attrs)
+
+    return pattern.sub(_rewrite, expr_text)
+
+
 def _build_task_action(
     *,
     py_name: str,
@@ -171,16 +224,33 @@ def _build_task_action(
     args: Mapping[str, Any],
     register: str | None,
     become: bool,
+    known_registers: Iterable[str],
+    play_vars: Mapping[str, Any],
 ) -> Any:
-    """Construct a ``@module_action`` that returns the given args verbatim.
+    """Construct a ``@module_action`` that renders Jinja2 templates in the
+    task's args using Burr state plus play-level vars as the context.
+
+    Per-task plays in the converter don't share registered facts the way a
+    single multi-task play would, so we render templates ourselves before
+    ansible-runner sees them. ``known_registers`` lists the names of every
+    ``register:`` target declared across the playbook; their values are
+    pulled from State on each invocation and added to the rendering context
+    alongside the play-level ``vars:`` block.
 
     The inner function's ``__name__`` is set BEFORE applying ``module_action``
-    so that ``functools.wraps`` inside the decorator carries the task's
-    real name through to ``_last_action`` and to the tracker.
+    so that ``functools.wraps`` inside the decorator carries the task's real
+    name through to ``_last_action`` and to the tracker.
     """
+    register_names = list(known_registers)
+    pinned_vars = dict(play_vars)
 
     def _impl(state: State) -> dict[str, Any]:
-        return dict(args)
+        context: dict[str, Any] = {**pinned_vars}
+        state_dict = state.get_all()
+        for name in register_names:
+            if name in state_dict:
+                context[name] = state_dict[name]
+        return _render_jinja(dict(args), context)
 
     _impl.__name__ = py_name
     return module_action(module, register=register, become=become)(_impl)
@@ -232,13 +302,17 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
     # ------------------------------------------------------------------
     # Walk the tasks: build one action per task, with a unique name. Detect
     # name collisions and append _2, _3, ... rather than silently merging.
+    # Done in two passes: first collect names, registers, when clauses; then
+    # build actions with the full set of register names + play vars in scope
+    # so Jinja templates inside task args can resolve at execution time.
     # ------------------------------------------------------------------
-    actions: dict[str, Any] = {}
     py_names: list[str] = []  # parallel to tasks
     when_clauses: list[str | None] = []
     failed_when_clauses: list[str | None] = []
     ignore_errors_flags: list[bool] = []
     register_targets: list[str | None] = []
+    # Parallel list of (module, args, register, become) for the second pass.
+    task_meta: list[tuple[str, dict[str, Any], str | None, bool]] = []
 
     used: set[str] = set()
     for idx, task in enumerate(tasks):
@@ -259,19 +333,39 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
         register = task.get("register")
         register_targets.append(register)
         become = bool(task.get("become", play_become))
-        actions[candidate] = _build_task_action(
-            py_name=candidate,
-            module=module,
-            args=args,
-            register=register,
-            become=become,
-        )
+        task_meta.append((module, args, register, become))
 
         when = task.get("when")
         when_clauses.append(_when_to_expr_string(when) if when is not None else None)
         fw = task.get("failed_when")
         failed_when_clauses.append(_when_to_expr_string(fw) if fw is not None else None)
         ignore_errors_flags.append(bool(task.get("ignore_errors", False)))
+
+    known_registers: set[str] = {r for r in register_targets if r}
+
+    actions: dict[str, Any] = {}
+    for candidate, (module, args, register, become) in zip(py_names, task_meta, strict=True):
+        actions[candidate] = _build_task_action(
+            py_name=candidate,
+            module=module,
+            args=args,
+            register=register,
+            become=become,
+            known_registers=known_registers,
+            play_vars=play_vars,
+        )
+
+    # Translate Jinja-style attribute access on registered names into the
+    # bracket access Python's eval expects. ``known_registers`` was assembled
+    # in the first pass over the tasks.
+    when_clauses = [
+        _translate_register_dot_access(c, known_registers) if c is not None else None
+        for c in when_clauses
+    ]
+    failed_when_clauses = [
+        _translate_register_dot_access(c, known_registers) if c is not None else None
+        for c in failed_when_clauses
+    ]
 
     # ------------------------------------------------------------------
     # Terminals: ``done`` (reached after the last task or when when-skipped)
