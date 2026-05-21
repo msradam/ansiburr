@@ -6,6 +6,22 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.15] - 2026-05-21
+
+### Added
+
+- Converter: ``gather_facts: yes`` now also surfaces ``ansible_facts``
+  as a top-level state dict, matching real-playbook idiom. A converted
+  task with ``when: ansible_facts.os_family == 'Debian'`` (the dominant
+  pattern in geerlingguy's roles) resolves correctly because the
+  dot-access translator rewrites it to ``ansible_facts['os_family']``
+  and the state dict is now populated where expected. The full module
+  result remains available at ``gathered_facts`` for callers that want
+  diagnostic fields like ``stdout`` or ``changed``.
+- ``ansible_facts`` and ``gathered_facts`` are added to the converter's
+  known-register set so the dot-access translator handles them
+  uniformly with user-declared registers.
+
 ## [0.0.14] - 2026-05-21
 
 ### Added
@@ -455,4 +471,5 @@ Initial alpha release.
 [0.0.12]: https://github.com/msradam/ansiburr/releases/tag/v0.0.12
 [0.0.13]: https://github.com/msradam/ansiburr/releases/tag/v0.0.13
 [0.0.14]: https://github.com/msradam/ansiburr/releases/tag/v0.0.14
-[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.14...HEAD
+[0.0.15]: https://github.com/msradam/ansiburr/releases/tag/v0.0.15
+[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.15...HEAD

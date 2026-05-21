@@ -1478,6 +1478,13 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
         )
 
     known_registers: set[str] = {r for r in register_targets if r}
+    if gather_facts:
+        # ``gather_facts: yes`` produces both ``ansible_facts`` (the projected
+        # facts dict) and ``gathered_facts`` (the full module result). Mark
+        # them so the dot-access translator rewrites
+        # ``when: ansible_facts.os_family == 'Debian'`` correctly.
+        known_registers.add("ansible_facts")
+        known_registers.add("gathered_facts")
 
     actions: dict[str, Any] = {}
     for candidate, meta in zip(py_names, task_meta, strict=True):
@@ -1592,12 +1599,45 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
         # host is fine for localhost playbooks (the common case for converted
         # tutorials). Users targeting a remote host should wire a ``host()``
         # profile and use ``host.gather_facts()`` directly.
-        @module_action("ansible.builtin.setup", register="gathered_facts")
-        def _setup(state: State) -> dict[str, Any]:
-            return {}
+        #
+        # The custom action below also surfaces ``ansible_facts`` as a top-level
+        # state dict. Real-world playbooks (geerlingguy's roles in particular)
+        # reference ``ansible_facts.os_family`` and ``ansible_facts.distribution``
+        # in ``when:`` clauses; without the projection the dot-access translator
+        # would rewrite to ``ansible_facts['os_family']`` against a non-existent
+        # top-level key. The full module result remains available as
+        # ``gathered_facts`` for callers that want the diagnostic fields.
+        @action(
+            reads=[],
+            writes=[
+                "gathered_facts",
+                "ansible_facts",
+                "_last_action",
+                "_last_failed",
+                "_last_changed",
+                "_last_unreachable",
+                "_last_msg",
+                "_last_failure_kind",
+            ],
+        )
+        def gather_facts_action(state: State) -> State:
+            from ansiburr._action import _classify_failure
+            from ansiburr._runner import run_module as _run
 
-        _setup.__name__ = "gather_facts"
-        actions["gather_facts"] = _setup
+            result = _run("ansible.builtin.setup", {})
+            facts = result.get("ansible_facts") or {}
+            return state.update(
+                gathered_facts=result,
+                ansible_facts=facts,
+                _last_action="gather_facts",
+                _last_failed=bool(result.get("failed")),
+                _last_changed=bool(result.get("changed")),
+                _last_unreachable=bool(result.get("unreachable")),
+                _last_msg=str(result.get("msg") or ""),
+                _last_failure_kind=_classify_failure(result),
+            )
+
+        actions["gather_facts"] = gather_facts_action
         entry = "gather_facts"
     else:
         entry = py_names[0]
@@ -1720,6 +1760,7 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
             state_init.setdefault(flag_key, False)
     if gather_facts:
         state_init.setdefault("gathered_facts", {})
+        state_init.setdefault("ansible_facts", {})
     builder = builder.with_state(**state_init).with_entrypoint(entry)
 
     if project is not None:

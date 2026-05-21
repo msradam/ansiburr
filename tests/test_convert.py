@@ -122,6 +122,24 @@ def test_jinja_templated_loop_still_raises() -> None:
         ansiburr.from_playbook(FIXTURES / "playbook_unsupported_loop.yml")
 
 
+def test_gather_facts_projects_ansible_facts_into_state() -> None:
+    """When ``gather_facts: yes`` is set on the play, the converted FSM
+    populates ``state['ansible_facts']`` with the projected facts dict
+    (matching real-playbook idiom ``ansible_facts.os_family``), in
+    addition to keeping the full module result at ``gathered_facts``."""
+    app = ansiburr.from_playbook(FIXTURES / "playbook_ansible_facts.yml")
+    last, _, final = app.run(halt_after=["done", "escalate"])
+    assert last.name == "done"
+    facts = final["ansible_facts"]
+    assert isinstance(facts, dict)
+    # The setup module always returns a non-trivial dict of facts.
+    assert len(facts) > 5, f"expected ansible_facts to be populated; got {len(facts)} keys"
+    # Downstream Jinja references resolve via the projection.
+    assert final["observed_system"] in ("Darwin", "Linux"), (
+        f"expected observed_system to resolve via ansible_facts; got {final['observed_system']!r}"
+    )
+
+
 def test_include_vars_loads_yaml_into_state() -> None:
     """``include_vars: file: path`` reads the referenced YAML and writes
     every top-level key into Burr state. Downstream Jinja templates
