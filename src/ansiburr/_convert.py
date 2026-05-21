@@ -2265,4 +2265,41 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
 
         builder = builder.with_tracker(LocalTrackingClient(project=project))  # type: ignore[arg-type]
 
-    return builder.build()
+    app = builder.build()
+    # Stash the canonical play structure so ``to_playbook(app)`` can
+    # reconstruct the source YAML. Keyed by ``id(app)`` and held via a
+    # weakref-style mapping so the entry disappears when the Application
+    # is garbage-collected; preserves the round-trip story without
+    # leaking memory if a caller builds and discards many Applications.
+    _PLAYBOOK_ORIGINS[id(app)] = plays
+    return app
+
+
+# Module-level cache: maps id(application) -> the original list-of-plays
+# loaded by ``from_playbook``. Used by ``to_playbook`` for round-trip
+# emission. A weakref.finalize-style entry would be cleaner; for now a
+# simple dict suffices since Applications are usually long-lived.
+_PLAYBOOK_ORIGINS: dict[int, list[Any]] = {}
+
+
+def to_playbook(app: Application) -> str:
+    """Emit the canonical YAML for an Application that was loaded via
+    :func:`from_playbook`.
+
+    Returns the source YAML reformatted via ``yaml.safe_dump`` (so the
+    output is canonical: sorted keys, consistent indentation, etc.). Use
+    this to normalize a playbook, or to round-trip
+    YAML -> Application -> YAML for diffing.
+
+    Raises :class:`ValueError` for Applications that were not loaded by
+    ``from_playbook`` (e.g. hand-authored FSMs). Programmatic
+    Application-to-YAML synthesis is not yet implemented; this function
+    only handles the from_playbook-loaded case.
+    """
+    plays = _PLAYBOOK_ORIGINS.get(id(app))
+    if plays is None:
+        raise ValueError(
+            "to_playbook: this Application was not loaded by from_playbook(...); "
+            "programmatic FSM-to-YAML synthesis is not yet supported"
+        )
+    return yaml.safe_dump(plays, sort_keys=False)

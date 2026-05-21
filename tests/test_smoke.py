@@ -35,6 +35,7 @@ def test_public_exports_stable() -> None:
         "module_action",
         "run_module",
         "snapshot_sentinels",
+        "to_playbook",
         "wait_until",
     }
     assert set(ansiburr.__all__) == expected

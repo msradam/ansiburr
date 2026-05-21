@@ -52,7 +52,7 @@ from ansiburr._action import (
     module_action,
     snapshot_sentinels,
 )
-from ansiburr._convert import UnsupportedPlaybookConstruct, from_playbook
+from ansiburr._convert import UnsupportedPlaybookConstruct, from_playbook, to_playbook
 from ansiburr._host import DEFAULT_FACT_KEYS, Host, host
 from ansiburr._runner import run_module
 from ansiburr._wait import WaitGraph, wait_until
@@ -84,5 +84,6 @@ __all__ = [
     "module_action",
     "run_module",
     "snapshot_sentinels",
+    "to_playbook",
     "wait_until",
 ]

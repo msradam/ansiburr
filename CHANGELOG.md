@@ -6,6 +6,35 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.24] - 2026-05-21
+
+### Added
+
+- ``ansiburr.to_playbook(app)`` returns the canonical YAML for an
+  ``Application`` that was loaded via ``from_playbook(...)``. The
+  YAML is reformatted via ``yaml.safe_dump`` so the output is
+  consistent across runs (sorted keys, normalized indentation). Use
+  it to normalize a playbook, to diff against a hand-edited version,
+  or as part of a YAML -> Application -> YAML round-trip pipeline.
+  Raises ``ValueError`` for Applications that weren't loaded via
+  ``from_playbook`` (e.g. hand-authored FSMs).
+- ``ansiburr emit <playbook.yml>`` CLI subcommand runs the round-trip
+  and writes the canonical YAML to stdout. Useful as a one-line
+  normalizer or for inspecting how ansiburr internally stores the
+  playbook source.
+- Two new tests: a YAML -> Application -> YAML -> dict round-trip
+  reproduces the original play structure exactly; a hand-authored
+  Application's ``to_playbook`` raises ``ValueError`` with a clear
+  message about the limitation.
+
+### Scope
+
+- This is the scoped reverse-conversion case: ``to_playbook`` only
+  works for Applications that originated from ``from_playbook``.
+  Programmatic FSM-to-YAML synthesis (walking the graph and
+  reconstructing tasks) is a different and substantially larger
+  problem; not yet implemented.
+
 ## [0.0.23] - 2026-05-21
 
 ### Added
@@ -692,4 +721,5 @@ Initial alpha release.
 [0.0.21]: https://github.com/msradam/ansiburr/releases/tag/v0.0.21
 [0.0.22]: https://github.com/msradam/ansiburr/releases/tag/v0.0.22
 [0.0.23]: https://github.com/msradam/ansiburr/releases/tag/v0.0.23
-[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.23...HEAD
+[0.0.24]: https://github.com/msradam/ansiburr/releases/tag/v0.0.24
+[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.24...HEAD

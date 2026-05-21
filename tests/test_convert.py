@@ -39,6 +39,41 @@ def test_register_capture_lands_in_state() -> None:
     assert ping.get("ping") == "pong"
 
 
+def test_to_playbook_round_trips() -> None:
+    """``to_playbook(from_playbook(p))`` produces a valid YAML that
+    re-parses to the same play structure."""
+    import yaml as _yaml
+
+    src_path = FIXTURES / "playbook_simple.yml"
+    app = ansiburr.from_playbook(src_path)
+    emitted = ansiburr.to_playbook(app)
+    re_parsed = _yaml.safe_load(emitted)
+    original = _yaml.safe_load(src_path.read_text())
+    assert re_parsed == original
+
+
+def test_to_playbook_raises_for_hand_authored_app() -> None:
+    """An Application that wasn't loaded via ``from_playbook`` has no
+    canonical YAML representation; ``to_playbook`` must raise rather
+    than silently emit a stub."""
+    from burr.core import ApplicationBuilder, action
+
+    @action(reads=[], writes=["x"])
+    def step(state):
+        return state.update(x=1)
+
+    app = (
+        ApplicationBuilder()
+        .with_actions(step=step)
+        .with_transitions()
+        .with_state(x=0)
+        .with_entrypoint("step")
+        .build()
+    )
+    with pytest.raises(ValueError, match="not loaded by from_playbook"):
+        ansiburr.to_playbook(app)
+
+
 def test_block_rescue_always_full_combo_rescued() -> None:
     """block + rescue + always where the block fails and rescue succeeds:
       - rescue runs (rescued=True)

@@ -207,6 +207,26 @@ def _cmd_graph(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_emit(args: argparse.Namespace) -> int:
+    """Round-trip a playbook through ``from_playbook`` then ``to_playbook``
+    and write the canonical YAML to stdout. Useful for normalizing a
+    playbook's formatting or for diffing against a hand-edited version.
+    """
+    from ansiburr import from_playbook, to_playbook
+
+    path = Path(args.path)
+    if not path.exists():
+        raise SystemExit(f"ansiburr: no such file: {path}")
+    if path.suffix.lower() not in _PLAYBOOK_SUFFIXES:
+        raise SystemExit(
+            f"ansiburr: emit expects a YAML playbook (one of "
+            f"{_PLAYBOOK_SUFFIXES}); got {path}"
+        )
+    app = from_playbook(path)
+    print(to_playbook(app), end="")
+    return 0
+
+
 def _cmd_lint(args: argparse.Namespace) -> int:
     """Dry-convert a playbook and report a structural summary.
 
@@ -334,6 +354,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     lint_p.add_argument("path", help="Path to a .yml / .yaml playbook.")
     lint_p.set_defaults(func=_cmd_lint)
+
+    emit_p = subparsers.add_parser(
+        "emit",
+        help="Round-trip a playbook YAML -> Application -> YAML and print the result.",
+    )
+    emit_p.add_argument("path", help="Path to a .yml / .yaml playbook.")
+    emit_p.set_defaults(func=_cmd_emit)
 
     return parser
 
