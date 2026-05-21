@@ -45,9 +45,33 @@ def test_block_with_rescue_still_raises() -> None:
         ansiburr.from_playbook(FIXTURES / "playbook_unsupported_block.yml")
 
 
-def test_unsupported_loop_raises() -> None:
+def test_jinja_templated_loop_still_raises() -> None:
+    """Literal-list ``loop:`` is supported. A Jinja-templated value
+    (``loop: \"{{ users }}\"``) is not yet, because resolving it needs
+    runtime variable evaluation we don't implement."""
     with pytest.raises(ansiburr.UnsupportedPlaybookConstruct, match="loop"):
         ansiburr.from_playbook(FIXTURES / "playbook_unsupported_loop.yml")
+
+
+def test_literal_loop_visits_each_item_in_order() -> None:
+    """A ``loop:`` with a literal list lowers to a three-action sub-FSM:
+    init -> task -> advance, with a back-edge from advance to task until
+    the items are exhausted. The task action exposes ``{{ item }}`` in
+    its Jinja context."""
+    app = ansiburr.from_playbook(FIXTURES / "playbook_with_loop.yml")
+    last, _, final = app.run(halt_after=["done", "escalate"])
+    assert last.name == "done"
+    # The literal list landed in state via the loop_init action.
+    assert final["_loop_greet_each_items"] == ["alice", "bob", "charlie"]
+    # The advance walked all three; the final advance flipped done to True.
+    assert final["_loop_greet_each_done"] is True
+    # The final idx counter is one past the last item.
+    assert final["_loop_greet_each_idx"] == 3
+    # The graph has the three loop nodes.
+    action_names = {a.name for a in app.graph.actions}
+    assert "greet_each_loop_init" in action_names
+    assert "greet_each" in action_names
+    assert "greet_each_loop_advance" in action_names
 
 
 def test_unsupported_roles_raises() -> None:

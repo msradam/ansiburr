@@ -1,9 +1,11 @@
+# Literal-list ``loop:`` is supported. A Jinja-templated loop value is
+# not yet supported because resolving it would need runtime variable
+# evaluation, so the converter must refuse this shape.
 - name: bad
   hosts: localhost
+  gather_facts: no
   tasks:
-    - name: with loop
+    - name: dynamic loop
       ansible.builtin.debug:
         msg: "{{ item }}"
-      loop:
-        - a
-        - b
+      loop: "{{ users_from_inventory }}"

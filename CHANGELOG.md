@@ -6,6 +6,30 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.6] - 2026-05-21
+
+### Added
+
+- Converter: ``loop:`` and ``with_items:`` with a literal list lower to a
+  three-action sub-FSM (``<task>_loop_init`` -> ``<task>`` -> ``<task>_loop_advance``)
+  with a back-edge from advance to the task body until the items are
+  exhausted. The task body sees the per-iteration value as ``{{ item }}``
+  in its Jinja context, matching Ansible's variable naming. Each iteration
+  is a discrete Burr step (visible in the trace and tracker).
+- Loop state surfaces as ``_loop_<task>_items``, ``_loop_<task>_idx``,
+  ``_loop_<task>_item``, ``_loop_<task>_done`` for FSMs that want to read
+  iteration progress from a downstream action.
+- Jinja-templated ``loop:`` values (e.g. ``loop: "{{ users }}"``) still
+  raise ``UnsupportedPlaybookConstruct`` because resolving them needs
+  runtime variable evaluation. Only literal lists are lowered in v0.0.6.
+
+### Tests
+
+- New positive test exercising a three-item loop end-to-end. The negative
+  ``test_unsupported_loop_raises`` was repurposed to
+  ``test_jinja_templated_loop_still_raises`` since literal-list loops
+  are now supported.
+
 ## [0.0.5] - 2026-05-21
 
 ### Added
@@ -196,4 +220,5 @@ Initial alpha release.
 [0.0.3]: https://github.com/msradam/ansiburr/releases/tag/v0.0.3
 [0.0.4]: https://github.com/msradam/ansiburr/releases/tag/v0.0.4
 [0.0.5]: https://github.com/msradam/ansiburr/releases/tag/v0.0.5
-[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.5...HEAD
+[0.0.6]: https://github.com/msradam/ansiburr/releases/tag/v0.0.6
+[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.6...HEAD

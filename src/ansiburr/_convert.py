@@ -103,13 +103,16 @@ _RESERVED_TASK_KEYS: frozenset[str] = frozenset(
 # expanded; ``rescue``/``always`` still raise (deferred to a later release).
 _FLATTEN_TASK_KEYS: frozenset[str] = frozenset({"include_tasks", "import_tasks", "block"})
 
+# ``loop:`` and ``with_items:`` are now first-class. ``with_dict``/
+# ``with_fileglob``/``with_subelements`` would each need their own item-
+# producing semantics; they still raise.
+_LOOP_KEYS: frozenset[str] = frozenset({"loop", "with_items"})
+
 _UNSUPPORTED_TASK_KEYS: frozenset[str] = frozenset(
     {
         "rescue",
         "always",
-        "loop",
         "loop_control",
-        "with_items",
         "with_dict",
         "with_fileglob",
         "with_subelements",
@@ -156,13 +159,14 @@ def _module_from_task(task: Mapping[str, Any]) -> tuple[str, Any]:
     non-reserved, non-unsupported, non-flatten key whose value is the module's
     args. The flatten keys (``include_tasks``, ``import_tasks``, ``block``)
     are expanded before this function runs, so seeing one here is a converter
-    bug."""
+    bug. Loop keys (``loop``, ``with_items``) are handled by the caller and
+    excluded from the module search."""
     for key in task:
         if key in _UNSUPPORTED_TASK_KEYS:
             raise UnsupportedPlaybookConstruct(
                 f"task uses unsupported construct {key!r}: {task.get('name', task)}"
             )
-    excluded = _RESERVED_TASK_KEYS | _FLATTEN_TASK_KEYS
+    excluded = _RESERVED_TASK_KEYS | _FLATTEN_TASK_KEYS | _LOOP_KEYS
     module_keys = [k for k in task if k not in excluded]
     if not module_keys:
         raise ValueError(f"task has no module reference: {task}")
@@ -363,6 +367,7 @@ def _build_task_action(
     become: bool,
     known_registers: Iterable[str],
     play_vars: Mapping[str, Any],
+    loop_item_state_key: str | None = None,
 ) -> Any:
     """Construct a ``@module_action`` that renders Jinja2 templates in the
     task's args using Burr state plus play-level vars as the context.
@@ -387,10 +392,90 @@ def _build_task_action(
         for name in register_names:
             if name in state_dict:
                 context[name] = state_dict[name]
+        if loop_item_state_key is not None and loop_item_state_key in state_dict:
+            # Match Ansible's variable name so playbook authors write
+            # ``{{ item }}`` and ``{{ item.name }}`` as they would in any
+            # loop-bearing task.
+            context["item"] = state_dict[loop_item_state_key]
         return _render_jinja(dict(args), context)
 
     _impl.__name__ = py_name
     return module_action(module, register=register, become=become)(_impl)
+
+
+def _loop_items_from_task(task: Mapping[str, Any]) -> list[Any]:
+    """Extract a literal-list ``loop:`` / ``with_items:`` value from a task,
+    or raise :class:`UnsupportedPlaybookConstruct` if the value is
+    Jinja-templated, a non-list scalar, or otherwise dynamic."""
+    raw = task.get("loop") if "loop" in task else task.get("with_items")
+    if isinstance(raw, str):
+        raise UnsupportedPlaybookConstruct(
+            "loop:/with_items: with a Jinja-templated or string value is not "
+            f"supported (got {raw!r}); only literal lists are lowered"
+        )
+    if not isinstance(raw, list):
+        raise ValueError(f"loop:/with_items: must be a list, got {type(raw).__name__}")
+    return list(raw)
+
+
+def _build_loop_init(
+    *,
+    py_name: str,
+    items_state_key: str,
+    item_state_key: str,
+    idx_state_key: str,
+    done_state_key: str,
+    items: list[Any],
+) -> Any:
+    """Build the pure-Python action that seeds the loop's iteration state.
+
+    Writes the literal item list, the current-item field (set to ``items[0]``),
+    the index counter (0), and a done flag (False unless items is empty)."""
+    writes = [items_state_key, item_state_key, idx_state_key, done_state_key]
+    empty = not items
+
+    def _impl(state: State) -> State:
+        return state.update(
+            **{
+                items_state_key: list(items),
+                item_state_key: items[0] if not empty else None,
+                idx_state_key: 0,
+                done_state_key: empty,
+            }
+        )
+
+    _impl.__name__ = py_name
+    return action(reads=[], writes=writes)(_impl)
+
+
+def _build_loop_advance(
+    *,
+    py_name: str,
+    items_state_key: str,
+    item_state_key: str,
+    idx_state_key: str,
+    done_state_key: str,
+) -> Any:
+    """Build the pure-Python action that advances the loop counter and
+    populates the next item, or flags ``done`` when the list is exhausted."""
+    reads = [items_state_key, idx_state_key]
+    writes = [item_state_key, idx_state_key, done_state_key]
+
+    def _impl(state: State) -> State:
+        items = state[items_state_key]
+        next_idx = state[idx_state_key] + 1
+        if next_idx < len(items):
+            return state.update(
+                **{
+                    item_state_key: items[next_idx],
+                    idx_state_key: next_idx,
+                    done_state_key: False,
+                }
+            )
+        return state.update(**{idx_state_key: next_idx, done_state_key: True})
+
+    _impl.__name__ = py_name
+    return action(reads=reads, writes=writes)(_impl)
 
 
 def _build_notify_marker(*, py_name: str, handlers: list[str]) -> Any:
@@ -533,8 +618,79 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
         task_meta.append(meta)
 
     notified_handlers_seen: set[str] = set()
+    # Index tracking for emitting loop back-edges during the transition pass.
+    # Maps the loop-task's py_name -> (init_py_name, advance_py_name, done_state_key).
+    loop_back_edges: dict[str, tuple[str, str, str]] = {}
+
     for idx, task in enumerate(leaf_tasks):
         raw_name = task.get("name") or f"task_{idx + 1}"
+
+        # ``loop:`` / ``with_items:`` lower to a three-action sub-FSM:
+        # init -> task -> advance, with a back-edge from advance to task
+        # until the items are exhausted. The task action reads the current
+        # item from a dedicated state key and exposes it as ``{{ item }}``
+        # in the rendered Jinja context, matching Ansible's variable naming.
+        if "loop" in task or "with_items" in task:
+            base_py = _slugify(raw_name)
+            init_py = _unique(f"{base_py}_loop_init")
+            task_py = _unique(base_py)
+            advance_py = _unique(f"{base_py}_loop_advance")
+            items_key = f"_loop_{task_py}_items"
+            item_key = f"_loop_{task_py}_item"
+            idx_key = f"_loop_{task_py}_idx"
+            done_key = f"_loop_{task_py}_done"
+            items = _loop_items_from_task(task)
+            module, args = _module_from_task(task)
+            register = task.get("register")
+            become = bool(task.get("become", play_become))
+            when = task.get("when")
+            fw = task.get("failed_when")
+
+            _record(
+                py_name=init_py,
+                when_clause=_when_to_expr_string(when) if when is not None else None,
+                failed_when_clause=None,
+                ignore_errors=True,
+                register=None,
+                meta=("loop_init", items_key, item_key, idx_key, done_key, items),
+            )
+            _record(
+                py_name=task_py,
+                when_clause=None,
+                failed_when_clause=_when_to_expr_string(fw) if fw is not None else None,
+                ignore_errors=bool(task.get("ignore_errors", False)),
+                register=register,
+                meta=("module", module, args, register, become, item_key),
+            )
+            _record(
+                py_name=advance_py,
+                when_clause=None,
+                failed_when_clause=None,
+                ignore_errors=True,
+                register=None,
+                meta=("loop_advance", items_key, item_key, idx_key, done_key),
+            )
+            loop_back_edges[advance_py] = (init_py, task_py, done_key)
+
+            notify_list = _coerce_notify_to_list(task.get("notify"))
+            if notify_list:
+                seen: dict[str, None] = {}
+                for handler in notify_list:
+                    slug = handler_name_to_slug[handler]
+                    seen.setdefault(slug, None)
+                marker_handlers = list(seen)
+                notified_handlers_seen.update(marker_handlers)
+                marker_name = _unique(f"_notify_{task_py}")
+                _record(
+                    py_name=marker_name,
+                    when_clause=None,
+                    failed_when_clause=None,
+                    ignore_errors=True,
+                    register=None,
+                    meta=("notify_marker", marker_handlers),
+                )
+            continue
+
         py = _unique(_slugify(raw_name))
         module, args = _module_from_task(task)
         register = task.get("register")
@@ -557,11 +713,11 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
             # *slugified* handler names so the resulting state keys are
             # valid Python identifiers (``_notified_say_hello`` rather than
             # ``_notified_say hello``).
-            seen: dict[str, None] = {}
+            slugs_seen: dict[str, None] = {}
             for handler in notify_list:
                 slug = handler_name_to_slug[handler]
-                seen.setdefault(slug, None)
-            marker_handlers = list(seen)
+                slugs_seen.setdefault(slug, None)
+            marker_handlers = list(slugs_seen)
             notified_handlers_seen.update(marker_handlers)
             marker_name = _unique(f"_notify_{py}")
             _record(
@@ -608,7 +764,13 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
     for candidate, meta in zip(py_names, task_meta, strict=True):
         kind = meta[0]
         if kind == "module":
-            _, module, args, register, become = meta
+            # Plain tasks have 5-tuples (kind, module, args, register, become);
+            # loop-body tasks have 6-tuples with an extra loop-item state key.
+            if len(meta) == 5:
+                _, module, args, register, become = meta
+                loop_item_key = None
+            else:
+                _, module, args, register, become, loop_item_key = meta
             actions[candidate] = _build_task_action(
                 py_name=candidate,
                 module=module,
@@ -617,10 +779,30 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
                 become=become,
                 known_registers=known_registers,
                 play_vars=play_vars,
+                loop_item_state_key=loop_item_key,
             )
         elif kind == "notify_marker":
             _, handlers = meta
             actions[candidate] = _build_notify_marker(py_name=candidate, handlers=handlers)
+        elif kind == "loop_init":
+            _, items_key, item_key, idx_key, done_key, items = meta
+            actions[candidate] = _build_loop_init(
+                py_name=candidate,
+                items_state_key=items_key,
+                item_state_key=item_key,
+                idx_state_key=idx_key,
+                done_state_key=done_key,
+                items=items,
+            )
+        elif kind == "loop_advance":
+            _, items_key, item_key, idx_key, done_key = meta
+            actions[candidate] = _build_loop_advance(
+                py_name=candidate,
+                items_state_key=items_key,
+                item_state_key=item_key,
+                idx_state_key=idx_key,
+                done_state_key=done_key,
+            )
         else:
             raise AssertionError(f"unknown task meta kind: {kind}")
 
@@ -712,6 +894,14 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
         # the deepest applicable skip when several conditions are satisfied.
         transitions.extend(reversed(skip_transitions))
 
+        # Loop back-edge: when this position is a ``loop_advance``, route
+        # back to the loop body until the iteration is exhausted. The
+        # default ``(current, nxt)`` then handles the exhausted case by
+        # falling through to whatever follows the loop block.
+        if current in loop_back_edges:
+            _init_py, task_py, done_key = loop_back_edges[current]
+            transitions.append((current, task_py, expr(f"not {done_key}")))
+
         transitions.append((current, nxt))
 
     # ------------------------------------------------------------------
@@ -735,6 +925,15 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
     # any task has had a chance to flip them.
     for handler_name in notified_handlers_seen:
         state_init.setdefault(f"_notified_{handler_name}", False)
+    # Pre-seed loop state so loop-init isn't strictly required for the
+    # state to be readable. Each loop's init action overwrites these.
+    for meta in task_meta:
+        if meta[0] == "loop_init":
+            _, items_key, item_key, idx_key, done_key, _items = meta
+            state_init.setdefault(items_key, [])
+            state_init.setdefault(item_key, None)
+            state_init.setdefault(idx_key, 0)
+            state_init.setdefault(done_key, False)
     if gather_facts:
         state_init.setdefault("gathered_facts", {})
     builder = builder.with_state(**state_init).with_entrypoint(entry)
