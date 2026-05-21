@@ -58,5 +58,5 @@ Initial alpha release.
   Apache, and an API change in a release ansiburr does not yet support
   will break installs at version-resolution time rather than at runtime.
 
-[0.0.1]: https://github.com/amsrahman/ansiburr/releases/tag/v0.0.1
-[Unreleased]: https://github.com/amsrahman/ansiburr/compare/v0.0.1...HEAD
+[0.0.1]: https://github.com/msradam/ansiburr/releases/tag/v0.0.1
+[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.1...HEAD

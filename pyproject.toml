@@ -33,9 +33,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/amsrahman/ansiburr"
-Source = "https://github.com/amsrahman/ansiburr"
-Issues = "https://github.com/amsrahman/ansiburr/issues"
+Homepage = "https://github.com/msradam/ansiburr"
+Source = "https://github.com/msradam/ansiburr"
+Issues = "https://github.com/msradam/ansiburr/issues"
 
 [build-system]
 requires = ["hatchling>=1.27"]
@@ -54,6 +54,7 @@ dev = [
     "mypy>=1.10",
     "types-pyyaml>=6",
     "docker>=7.1.0",
+    "twine>=6.2.0",
 ]
 
 [tool.ruff]

@@ -179,7 +179,7 @@ This README is engineering documentation, not legal advice.
 ## Development
 
 ```sh
-git clone https://github.com/<owner>/ansiburr
+git clone https://github.com/msradam/ansiburr
 cd ansiburr
 uv sync
 uv run pytest
