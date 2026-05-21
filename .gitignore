@@ -20,8 +20,8 @@ venv/
 examples/service_remediation/.demo_key
 examples/service_remediation/.demo_key.pub
 
-# Local demo state
-/tmp/coffee/
+# Local demo state co-located with each example
+examples/coffee_order_ansible/.queue/
 
 # Burr local tracker output (project-relative if anyone re-roots HOME)
 .burr/

@@ -1,0 +1,6 @@
+- name: bad
+  hosts: localhost
+  tasks:
+    - name: try
+      block:
+        - ansible.builtin.ping:

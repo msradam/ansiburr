@@ -145,6 +145,30 @@ _LOG_FIXTURES: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 
+@target.shell()
+def cleanup_other_ansiburr_confs(state: State) -> dict[str, Any]:
+    """Remove conf.d files written by other ansiburr demos.
+
+    The shared container is used by several demos (``config_drift``,
+    ``plan_then_apply``, etc.) and they each drop a ``listen 80 default_server``
+    server block under different filenames. Multiple ``default_server``
+    directives in the same nginx server cause ``nginx -t`` to fail. This
+    cleanup is the precondition that lets this demo run after any other
+    has left state behind. Idempotent: ``find`` with ``-delete`` is a
+    no-op when nothing matches.
+    """
+    return {
+        "cmd": (
+            "find /etc/nginx/conf.d -maxdepth 1 "
+            "-type f -name 'ansiburr-*.conf' "
+            "! -name 'ansiburr-mast-server.conf' "
+            "! -name 'ansiburr-limits.conf' "
+            "-delete; "
+            "find /etc/nginx/conf.d -maxdepth 1 -type f -name 'ansiburr.conf' -delete"
+        )
+    }
+
+
 @target.copy()
 def ensure_demo_listener(state: State) -> dict[str, Any]:
     """Demo precondition: lay down a minimal nginx server block on port 80.
@@ -578,6 +602,7 @@ def build_application() -> Application:
     return (
         ApplicationBuilder()
         .with_actions(
+            cleanup_other_ansiburr_confs=cleanup_other_ansiburr_confs,
             ensure_demo_listener=ensure_demo_listener,
             ensure_nginx_started=ensure_nginx_started,
             fetch_state=fetch_state,
@@ -608,6 +633,7 @@ def build_application() -> Application:
             escalate=escalate,
         )
         .with_transitions(
+            ("cleanup_other_ansiburr_confs", "ensure_demo_listener"),
             ("ensure_demo_listener", "ensure_nginx_started"),
             ("ensure_nginx_started", "fetch_state"),
             ("fetch_state", "read_log"),
@@ -671,7 +697,7 @@ def build_application() -> Application:
             disk_df_stdout="",
             failure_reason="",
         )
-        .with_entrypoint("ensure_demo_listener")
+        .with_entrypoint("cleanup_other_ansiburr_confs")
         .build()
     )
 

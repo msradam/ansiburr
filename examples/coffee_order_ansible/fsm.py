@@ -1,25 +1,25 @@
-"""The reversal: burr-mcp's coffee_order FSM, every action body swapped for an Ansible module.
+"""Coffee-order FSM with Ansible-backed action bodies.
 
-Original (burr-mcp/examples/coffee_order.py) is a small non-linear FSM with
-five actions (``take_order``, ``add_modifier``, ``pay``, ``fulfill``,
-``cancel``), a self-loop on ``add_modifier``, and two terminal stages.
-Each action body is a pure-Python ``state.update(...)``.
+A small non-linear FSM (five actions, self-loop on ``add_modifier``, two
+terminal stages) whose actions perform real filesystem operations through
+Ansible modules rather than mutating Python objects:
 
-This file preserves the graph topology EXACTLY and replaces each action
-body with a real Ansible module call against a filesystem-as-queue::
+    take_order   -> ansible.builtin.copy     writes .queue/active.json
+    add_modifier -> ansible.builtin.copy     rewrites file with new modifier
+    pay          -> ansible.builtin.copy     rewrites with status=paid + paid_amount
+    fulfill      -> ansible.builtin.command  mv active.json -> done/<ts>.json
+    cancel       -> ansible.builtin.file     state=absent
 
-    take_order   -> ansible.builtin.copy        writes /tmp/coffee/active.json
-    add_modifier -> ansible.builtin.copy        rewrites file with new modifier
-    pay          -> ansible.builtin.copy        rewrites with status=paid + paid_amount
-    fulfill      -> ansible.builtin.command     mv active.json -> done/<ts>.json
-    cancel       -> ansible.builtin.file        state=absent
+State lives under ``examples/coffee_order_ansible/.queue/`` (gitignored)
+rather than ``/tmp/``: critical system directories must not be treated as
+scratch space owned by any single demo.
 
-The Burr state still tracks the order shape (``item``, ``qty``, ``modifiers``,
-``total``, ``stage``) so transitions and the agent-facing schema are
-identical; the difference is that **the source of truth is the file on
-disk**, written by Ansible modules. The same Burr graph can be backed by
-mutating Python objects (the original) or persistent infrastructure
-operations (this file). That's the substrate flexibility ansiburr aims for.
+Burr state tracks the order shape (``item``, ``qty``, ``modifiers``,
+``total``, ``stage``) so transitions and the agent-facing schema look the
+same as any pure-Python Burr graph. The difference is that the source of
+truth is the file on disk, written by Ansible modules. This demonstrates
+that the same FSM topology composes equally well with mutating Python
+objects or with persistent infrastructure operations.
 
 Uses ansiburr features:
 - Burr per-step inputs (``item``, ``qty``, ``modifier``, ``amount``)
@@ -27,7 +27,7 @@ Uses ansiburr features:
   app-level fields land in state even though Ansible's copy module
   returns only file metadata.
 
-Run-of-show::
+Run::
 
     uv run python examples/coffee_order_ansible/fsm.py
 """
@@ -48,7 +48,10 @@ from ansiburr import initial_sentinels, module_action
 _BASE_PRICE = 5.0
 _MODIFIER_PRICE = {"extra_shot": 1.0, "oat_milk": 1.0, "syrup": 1.0}
 
-_QUEUE_DIR = Path("/tmp/coffee")
+# Demo writes its filesystem-queue state under the example directory rather
+# than /tmp. /tmp is shared with other processes on the host and must not be
+# treated as scratch space owned by any single demo.
+_QUEUE_DIR = Path(__file__).resolve().parent / ".queue"
 _ACTIVE_PATH = _QUEUE_DIR / "active.json"
 _DONE_DIR = _QUEUE_DIR / "done"
 
@@ -176,7 +179,14 @@ def report(state: State) -> State:
 
 
 def build_application() -> Application:
-    """Same transition graph as burr-mcp/examples/coffee_order.py, verbatim."""
+    """Build the coffee-order Application.
+
+    Transition graph: ``take_order`` reaches ``pay``, ``add_modifier``, or
+    ``cancel`` from the ``ordered`` stage. ``add_modifier`` loops on itself
+    and can also reach ``pay`` or ``cancel``. ``pay`` advances to ``fulfill``
+    from the ``paid`` stage. ``fulfill`` and ``cancel`` both reach a final
+    ``report`` action.
+    """
     ordered = Condition.expr("stage == 'ordered'")
     paid = Condition.expr("stage == 'paid'")
     return (
@@ -220,11 +230,11 @@ def _step_as(app: Application, action_name: str, inputs: dict[str, Any]) -> Any:
     transition Burr's auto-router would pick.
 
     Burr's ``step()`` consults transitions in declaration order and picks the
-    first one whose predicate holds. For the coffee_order FSM (which is meant
-    to be agent-driven), that means programmatic walks always take the first
-    transition and never visit ``add_modifier`` or ``cancel``. Pattern borrowed
-    from burr-mcp's adapter: monkey-patch ``get_next_action`` to return the
-    action we asked for, then call step.
+    first one whose predicate holds. For an agent-driven FSM with multiple
+    guarded edges out of the same source, programmatic walks always take the
+    first matching transition. Monkey-patching ``get_next_action`` to return
+    the action we asked for, then calling step, lets the demo walk any path
+    explicitly.
     """
     actions_by_name = {a.name: a for a in app.graph.actions}
     target = actions_by_name[action_name]

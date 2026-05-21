@@ -46,6 +46,7 @@ from ansiburr._action import (
     module_action,
     snapshot_sentinels,
 )
+from ansiburr._convert import UnsupportedPlaybookConstruct, from_playbook
 from ansiburr._host import DEFAULT_FACT_KEYS, Host, host
 from ansiburr._runner import run_module
 from ansiburr._wait import WaitGraph, wait_until
@@ -62,8 +63,10 @@ __all__ = [
     "DEFAULT_FACT_KEYS",
     "SENTINEL_KEYS",
     "Host",
+    "UnsupportedPlaybookConstruct",
     "WaitGraph",
     "__version__",
+    "from_playbook",
     "host",
     "initial_sentinels",
     "module_action",

@@ -1,0 +1,9 @@
+- name: bad
+  hosts: localhost
+  tasks:
+    - name: with loop
+      ansible.builtin.debug:
+        msg: "{{ item }}"
+      loop:
+        - a
+        - b
