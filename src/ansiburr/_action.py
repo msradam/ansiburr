@@ -1,0 +1,169 @@
+"""The ``module_action`` decorator: a Burr action backed by an Ansible module."""
+
+from __future__ import annotations
+
+import functools
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any
+
+from burr.core import State, action
+
+from ansiburr._runner import run_module
+
+ModuleArgsBuilder = Callable[..., dict[str, Any]]
+WrappedAction = Callable[..., tuple[dict[str, Any], State]]
+
+SENTINEL_KEYS = (
+    "_last_action",
+    "_last_failed",
+    "_last_changed",
+    "_last_unreachable",
+    "_last_msg",
+)
+
+
+def initial_sentinels() -> dict[str, Any]:
+    """Default values for ambient sentinel keys, suitable for ``with_state(...)``.
+
+    Pre-seeding sentinels lets transitions reference ``_last_failed`` before any
+    ``@module_action`` has run yet (e.g. when the entrypoint is a plain Python
+    action that branches on whether to bother calling Ansible at all).
+    """
+    return {
+        "_last_action": "",
+        "_last_failed": False,
+        "_last_changed": False,
+        "_last_unreachable": False,
+        "_last_msg": "",
+    }
+
+
+def snapshot_sentinels(*, write: str = "failure_reason", max_msg_len: int = 300) -> WrappedAction:
+    """Pure-Python Burr action that copies the ambient sentinels into a durable state key.
+
+    Sentinels are overwritten by every subsequent ``@module_action``, so any
+    recovery step (rollback, cleanup) following a failure clobbers the diagnostic
+    before a terminal action can show it. Insert this action between the failure
+    point and the recovery step::
+
+        ("test_config", "snapshot_failure", expr("_last_failed")),
+        ("snapshot_failure", "restore_backup"),
+        ("restore_backup", "escalate"),
+
+    The terminal then reads ``write`` (default: ``failure_reason``) to surface
+    *why* we escalated, even after the recovery action ran cleanly.
+    """
+
+    @action(reads=["_last_action", "_last_msg"], writes=[write])
+    def _snapshot(state: State) -> State:
+        reason = f"{state['_last_action']}: {state['_last_msg'][:max_msg_len]}"
+        return state.update(**{write: reason})
+
+    return _snapshot
+
+
+def module_action(
+    module: str,
+    *,
+    reads: Sequence[str] = (),
+    writes: Sequence[str] | Mapping[str, str] = (),
+    register: str | None = None,
+    host: str = "localhost",
+    connection: Mapping[str, Any] | None = None,
+    become: bool = False,
+    check_mode: bool = False,
+    diff: bool = False,
+) -> Callable[[ModuleArgsBuilder], WrappedAction]:
+    """Wrap a function so it executes an Ansible module as a Burr action.
+
+    The wrapped function receives Burr ``State`` and returns a dict of module
+    arguments. After the module runs, each entry in ``writes`` projects a
+    field from the module result into state. ``writes`` may be a list (each
+    name is both the state key and the result key) or a dict mapping
+    ``state_key -> result_key`` (useful when the same Ansible result field
+    must land under different state names in different actions, e.g. shell
+    ``stdout`` becoming ``uptime_stdout`` vs ``df_stdout``).
+
+    ``register`` is the Ansible-style idiom for "capture the entire module
+    result under a single state key." Equivalent to playbook
+    ``register: <name>``. The full result dict (with ``changed``, ``stdout``,
+    ``stderr``, all module-specific fields) lands at ``state[register]``,
+    in addition to any fields explicitly projected via ``writes``.
+
+    Every action also writes ambient sentinels: ``_last_action`` (this
+    action's name), ``_last_failed``, ``_last_changed``, ``_last_unreachable``,
+    and ``_last_msg`` (Ansible's diagnostic message on failure). Transitions
+    can branch on these without each action having to opt-in via ``writes``.
+
+    ``check_mode=True`` runs the module in dry-run: it reports what it WOULD
+    change without making changes. Pair with ``diff=True`` to also capture
+    structured before/after content. Useful for plan-before-apply patterns.
+
+    ``connection`` is an optional dict of Ansible hostvars (``ansible_host``,
+    ``ansible_port``, ``ansible_user``, ``ansible_ssh_private_key_file``,
+    ``ansible_ssh_common_args``, etc.) that targets a remote host. Without it,
+    actions run on the local controller.
+    """
+    reads_list = list(reads)
+    writes_map = dict(writes) if isinstance(writes, Mapping) else {name: name for name in writes}
+    user_writes_keys = list(writes_map.keys())
+    all_writes_keys = user_writes_keys + [k for k in SENTINEL_KEYS if k not in writes_map]
+    if register is not None and register not in all_writes_keys:
+        all_writes_keys.append(register)
+    if diff and "_last_diff" not in all_writes_keys:
+        all_writes_keys.append("_last_diff")
+
+    def decorator(fn: ModuleArgsBuilder) -> WrappedAction:
+        @action(reads=reads_list, writes=all_writes_keys)
+        @functools.wraps(fn)
+        def wrapped(state: State, **inputs: Any) -> tuple[dict[str, Any], State]:
+            # Forward Burr per-step inputs (declared in fn's signature beyond
+            # ``state``) to the user function. ``functools.wraps`` preserves
+            # fn's signature for Burr's introspection, so the inputs are
+            # surfaced to MCP clients via JSON Schema.
+            user_return = fn(state, **inputs)
+            # Accept either a plain args dict (module args only; state is
+            # populated from module result via writes_map) or a (args, overrides)
+            # tuple. Overrides are useful when state fields are computed in
+            # Python from inputs (e.g., "total = qty * price") rather than read
+            # back from the module result, which only knows about checksums and
+            # paths, not app-domain values.
+            state_overrides: dict[str, Any]
+            if isinstance(user_return, tuple):
+                module_args, state_overrides = user_return
+            else:
+                module_args, state_overrides = user_return, {}
+            result = run_module(
+                module,
+                module_args,
+                host=host,
+                connection=connection,
+                become=become,
+                check_mode=check_mode,
+                diff=diff,
+            )
+            update: dict[str, Any] = {
+                state_key: result.get(result_key) for state_key, result_key in writes_map.items()
+            }
+            update.update(state_overrides)
+            if register is not None:
+                update[register] = result
+            if diff:
+                # Project ansible's structured diff into a durable state field so
+                # the tracker captures before/after content and downstream Python
+                # actions (plan reviewers, approval gates) can read it.
+                update["_last_diff"] = result.get("diff")
+            update["_last_action"] = fn.__name__
+            update["_last_failed"] = bool(result.get("failed"))
+            update["_last_changed"] = bool(result.get("changed"))
+            update["_last_unreachable"] = bool(result.get("unreachable"))
+            update["_last_msg"] = str(result.get("msg") or "")
+            # Return (result, state) so Burr's tracker captures the full Ansible
+            # module output (stdout/stderr/rc/diff/changed/...) alongside the state
+            # snapshot. State alone is lossy: a 300-line nginx -t output, or a
+            # template module's full diff, is gone if we don't surface it here.
+            return result, state.update(**update)
+
+        return wrapped
+
+    return decorator
