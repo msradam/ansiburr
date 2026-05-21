@@ -4,6 +4,8 @@ Run Ansible modules as Burr state-machine actions in Python.
 
 A single decorator wraps an Ansible module call as a Burr `@action`. The module runs through `ansible-runner` against the target host. Its result projects into Burr's `State`, and the action's `_last_failed`, `_last_changed`, and `_last_msg` flags become available to downstream transitions. The output is a standard Burr `Application` that runs, persists, traces, and serves like any other Burr graph.
 
+![ansiburr stepping through a six-action FSM](vhs/hero.gif)
+
 ## What you can build
 
 - Self-healing service workflows that observe, decide, and remediate one Ansible module at a time, with every step visible in Burr's tracker.
@@ -11,18 +13,6 @@ A single decorator wraps an Ansible module call as a Burr `@action`. The module 
 - Cross-platform automation that gathers facts on the target up front and dispatches to the right modules based on the OS family, init system, or package manager.
 - Plan-then-apply pipelines using Ansible's `--check` and `--diff` with a deterministic review gate before any change runs.
 - Polling sub-graphs (port readiness, service health, file existence) where every poll attempt is a discrete step in the trace.
-
-## Why not just call ansible-runner directly
-
-A direct `ansible_runner.run(...)` call inside a Burr `@action` works for one or two modules. Beyond that, the same bookkeeping gets repeated each time. ansiburr collects it into a small set of conventions:
-
-- `host()` declares connection metadata once and exposes module shorthands (`.service`, `.copy`, `.shell`, `.template`, etc.) bound to that host.
-- Ambient `_last_failed`, `_last_changed`, `_last_unreachable`, and `_last_msg` state keys make transitions readable without per-action declarations.
-- `gather_facts()` flattens facts into top-level state keys so transitions can branch on `ansible_pkg_mgr` or `ansible_os_family`.
-- `register=` captures the full module result dict when transitions need it.
-- `check_mode=True` and `diff=True` project Ansible's structured diff into a state field for plan-before-apply patterns.
-- `wait_until()` materializes polling loops as observable FSM steps instead of one opaque blocking module call.
-- ControlPersist and pipelining are enabled by default for SSH connection reuse across modules targeting the same host.
 
 ## Install
 
@@ -102,18 +92,6 @@ print(final["report"])
 ```
 
 The same FSM works against Debian, RHEL, Fedora, Arch, or any other distro Ansible supports. The branch is taken by the gathered fact, not by hard-coded logic.
-
-## Recorded demos
-
-`fact_driven_inspect`: gather facts on the target, branch on `ansible_pkg_mgr`, run the apt-specific inspection, summarize.
-
-![fact_driven_inspect demo](vhs/fact_driven_inspect.gif)
-
-`plan_then_apply`: three scenarios. A small diff under policy gets approved and applied. An oversized diff is rejected by the review action before any apply runs. A re-run with the default value is idempotent.
-
-![plan_then_apply demo](vhs/plan_then_apply.gif)
-
-The tape scripts that produced these are in `vhs/`. Re-record with `vhs vhs/<name>.tape`.
 
 ## Demo corpus
 
