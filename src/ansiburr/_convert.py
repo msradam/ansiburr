@@ -628,6 +628,63 @@ def _build_loop_advance(
 
 _SET_FACT_MODULES: frozenset[str] = frozenset({"set_fact", "ansible.builtin.set_fact"})
 
+_INCLUDE_VARS_MODULES: frozenset[str] = frozenset(
+    {"include_vars", "ansible.builtin.include_vars"}
+)
+
+
+def _build_include_vars_action(
+    *,
+    py_name: str,
+    file_path: Path,
+    namespace: str | None,
+) -> Any:
+    """Build a pure-Python action that loads variables from a YAML file
+    into Burr state at task execution time.
+
+    Mirrors Ansible's ``include_vars: file.yml`` semantics: the file is
+    parsed as a dict and every key becomes a state field. When
+    ``namespace`` is given (``include_vars: name=ns file=...``), the
+    entire dict lands at ``state[namespace]`` instead of being spread.
+
+    The file is read lazily on each invocation so a vars file edited
+    between Application runs picks up the new content; the cost is one
+    YAML parse per call, which is negligible against ansible-runner's
+    overhead elsewhere.
+    """
+    resolved_path = file_path.resolve()
+
+    if namespace is not None:
+        writes = [namespace]
+
+        def _impl(state: State) -> State:
+            with resolved_path.open() as f:
+                loaded = yaml.safe_load(f) or {}
+            if not isinstance(loaded, Mapping):
+                raise ValueError(
+                    f"include_vars: {resolved_path} top level must be a mapping; "
+                    f"got {type(loaded).__name__}"
+                )
+            return state.update(**{namespace: dict(loaded)})
+
+    else:
+        with resolved_path.open() as f:
+            initial_keys = list((yaml.safe_load(f) or {}).keys())
+        writes = list(initial_keys)
+
+        def _impl(state: State) -> State:
+            with resolved_path.open() as f:
+                loaded = yaml.safe_load(f) or {}
+            if not isinstance(loaded, Mapping):
+                raise ValueError(
+                    f"include_vars: {resolved_path} top level must be a mapping; "
+                    f"got {type(loaded).__name__}"
+                )
+            return state.update(**loaded)
+
+    _impl.__name__ = py_name
+    return action(reads=[], writes=writes)(_impl)
+
 
 def _build_save_failure_action(*, py_name: str, flag_state_key: str) -> Any:
     """Build a pure-Python action that latches ``_last_failed`` into a sticky
@@ -1308,6 +1365,40 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
                 register=None,
                 meta=("set_fact", args),
             )
+        elif module in _INCLUDE_VARS_MODULES:
+            # ``include_vars: file: path`` (or short form ``include_vars: path``).
+            # Resolve the path relative to the playbook's base_dir; refuse
+            # Jinja-templated paths and lookup() expressions because they
+            # need runtime evaluation we don't implement.
+            file_value: Any
+            namespace_value: str | None
+            if isinstance(args, Mapping):
+                file_value = args.get("file") or args.get("_raw_params")
+                namespace_value = args.get("name")
+            else:
+                file_value = args.get("_raw_params") if isinstance(args, dict) else None
+                namespace_value = None
+            if not isinstance(file_value, str):
+                raise UnsupportedPlaybookConstruct(
+                    "include_vars: only the simple ``file: path`` form is supported; "
+                    f"got {file_value!r}"
+                )
+            if "{{" in file_value or "lookup(" in file_value:
+                raise UnsupportedPlaybookConstruct(
+                    "include_vars: Jinja templates and lookup() expressions in "
+                    f"the path are not supported (got {file_value!r})"
+                )
+            vars_path = (base_dir / file_value).resolve()
+            if not vars_path.exists():
+                raise FileNotFoundError(f"include_vars: file not found: {vars_path}")
+            _record(
+                py_name=py,
+                when_clause=_when_to_expr_string(when) if when is not None else None,
+                failed_when_clause=None,
+                ignore_errors=True,
+                register=None,
+                meta=("include_vars", vars_path, namespace_value),
+            )
         else:
             _record(
                 py_name=py,
@@ -1457,6 +1548,11 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
             _, flag_key = meta
             actions[candidate] = _build_restore_failure_action(
                 py_name=candidate, flag_state_key=flag_key
+            )
+        elif kind == "include_vars":
+            _, vars_path, namespace_value = meta
+            actions[candidate] = _build_include_vars_action(
+                py_name=candidate, file_path=vars_path, namespace=namespace_value
             )
         else:
             raise AssertionError(f"unknown task meta kind: {kind}")

@@ -122,6 +122,18 @@ def test_jinja_templated_loop_still_raises() -> None:
         ansiburr.from_playbook(FIXTURES / "playbook_unsupported_loop.yml")
 
 
+def test_include_vars_loads_yaml_into_state() -> None:
+    """``include_vars: file: path`` reads the referenced YAML and writes
+    every top-level key into Burr state. Downstream Jinja templates
+    resolve against the freshly-loaded values."""
+    app = ansiburr.from_playbook(FIXTURES / "playbook_include_vars.yml")
+    last, _, final = app.run(halt_after=["done", "escalate"])
+    assert last.name == "done"
+    assert final["distro_family"] == "debian"
+    assert final["package_manager"] == "apt"
+    assert final["default_packages"] == ["curl", "jq"]
+
+
 def test_set_fact_writes_into_state_and_jinja_resolves_downstream() -> None:
     """``set_fact:`` lowers to a pure-Python state update, and a downstream
     ``set_fact:`` that templates the freshly-written value resolves it from

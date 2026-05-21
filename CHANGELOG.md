@@ -6,6 +6,27 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.14] - 2026-05-21
+
+### Added
+
+- Converter: ``include_vars: file: <path>`` (and the FQCN
+  ``ansible.builtin.include_vars:`` form) lowers to a pure-Python
+  action that reads the referenced YAML at task execution and writes
+  every top-level key into Burr state. The ``name:`` argument
+  (Ansible's namespacing form) lands the whole dict under
+  ``state[<name>]`` instead of spreading the keys. Found while testing
+  the converter against geerlingguy's published roles; their
+  ``include_vars`` calls open every dispatch chain.
+
+### Still rejected
+
+- ``include_vars`` with ``lookup(...)`` expressions or Jinja-templated
+  paths. The ``first_found`` lookup pattern that geerlingguy roles use
+  for OS-conditional dispatch needs runtime evaluation we don't
+  implement. Workaround: replace with a literal-path
+  ``include_vars: file: ...`` per branch under explicit ``when:`` gates.
+
 ## [0.0.13] - 2026-05-21
 
 ### Added
@@ -433,4 +454,5 @@ Initial alpha release.
 [0.0.11]: https://github.com/msradam/ansiburr/releases/tag/v0.0.11
 [0.0.12]: https://github.com/msradam/ansiburr/releases/tag/v0.0.12
 [0.0.13]: https://github.com/msradam/ansiburr/releases/tag/v0.0.13
-[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.13...HEAD
+[0.0.14]: https://github.com/msradam/ansiburr/releases/tag/v0.0.14
+[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.14...HEAD
