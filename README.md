@@ -154,7 +154,7 @@ ansiburr graph examples/from_playbook/playbook.yml --format dot
 
 ## Demo corpus
 
-`examples/` contains eleven self-contained FSMs. Most run against a local Docker container set up by `examples/service_remediation/setup.sh`.
+`examples/` contains twelve self-contained FSMs plus two playbook-conversion demos. Most of the FSMs run against a local Docker container set up by `examples/service_remediation/setup.sh`; the conversion demos and a few others run locally.
 
 | Demo | What it shows | Collections used |
 |---|---|---|
@@ -169,8 +169,10 @@ ansiburr graph examples/from_playbook/playbook.yml --format dot
 | `coffee_order_ansible` | Burr's `coffee_order` topology with every action body swapped for an Ansible module operating on a filesystem queue | `ansible.builtin` |
 | `fact_driven_inspect` | `gather_facts()` state expansion; transitions branch on `ansible_pkg_mgr` | `ansible.builtin` |
 | `plan_then_apply` | check+diff plan, deterministic review gate, `wait_until` polling sub-graph, apply with verify | `ansible.builtin` |
+| `from_playbook` | Small playbook (`command` + `register` + `when` + Jinja debug) lifted via `from_playbook(...)` | `ansible.builtin` |
+| `from_playbook_advanced` | Multi-feature playbook (`set_fact`, `block`, `loop`, `notify` + handlers, `changed_when`) lifted via `from_playbook(...)`; runs locally | `ansible.builtin` |
 
-Each example runs in seconds. Run an individual demo with `uv run python examples/<name>/fsm.py`.
+Each example runs in seconds. Run an individual demo with `uv run python examples/<name>/fsm.py` (or `run.py` for the conversion demos).
 
 The full library API and the Ansible-playbook-idiom mapping live in [REFERENCE.md](./REFERENCE.md).
 

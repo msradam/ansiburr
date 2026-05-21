@@ -6,6 +6,25 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.8] - 2026-05-21
+
+### Added
+
+- ``examples/from_playbook_advanced/`` exercising the converter end-to-end
+  on a multi-feature playbook (``set_fact``, ``block`` group, ``loop`` over
+  a literal list with per-iteration ``{{ item }}``, ``notify`` + handler,
+  ``changed_when: false`` on a read-only command, ``when:`` skip). The
+  run.py reports each construct's effect from the final state so the
+  conversion is visible at the command line. Workspace lives under
+  ``~/.ansiburr-advanced-demo`` (not ``/tmp``) and is cleaned up by the
+  playbook's final task.
+
+### Documented
+
+- README demo-corpus table now lists both conversion demos
+  (``from_playbook`` and the new ``from_playbook_advanced``) and reflects
+  the actual demo count (twelve FSMs plus two conversion demos).
+
 ## [0.0.7] - 2026-05-21
 
 ### Added
@@ -251,4 +270,5 @@ Initial alpha release.
 [0.0.5]: https://github.com/msradam/ansiburr/releases/tag/v0.0.5
 [0.0.6]: https://github.com/msradam/ansiburr/releases/tag/v0.0.6
 [0.0.7]: https://github.com/msradam/ansiburr/releases/tag/v0.0.7
-[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.7...HEAD
+[0.0.8]: https://github.com/msradam/ansiburr/releases/tag/v0.0.8
+[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.8...HEAD
