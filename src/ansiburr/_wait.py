@@ -1,18 +1,16 @@
-"""``wait_until()`` — polling sub-graph builder.
+"""``wait_until()``: polling sub-graph builder.
 
-Ansible's ``wait_for`` (and ``wait_for_connection``, ``pause``, friends) are
-structurally different from one-shot modules like ``copy`` or ``service``:
-they block until a condition holds, with a timeout. Wrapping them as a single
-``@module_action`` collapses an unbounded polling loop into one opaque Burr
-step, which throws away the granular trace observability that's most of
-Burr's value.
+Ansible's ``wait_for`` (and ``wait_for_connection``, ``pause``) differ from
+one-shot modules like ``copy`` or ``service``: they block until a condition
+holds, with a timeout. Wrapping such a module in a single ``@module_action``
+collapses the polling loop into one opaque Burr step, which loses the
+per-iteration visibility a tracker provides.
 
-``wait_until()`` materializes the polling loop as native FSM structure: two
-internal actions (a ``check`` and an ``increment_wait``) with transitions
-that branch on the condition each iteration. Every poll attempt is a discrete
-step in the Burr tracker; timeouts route to a caller-supplied terminal; the
-LLM (or whatever else) never decides when to stop — the FSM does, per the
-MAST FM-1.5 recommendation.
+``wait_until()`` produces a polling loop as native FSM structure: a check
+action and an increment_wait action, plus transitions that branch on the
+condition each iteration. Every poll attempt is a discrete tracker step.
+Timeouts route to a caller-supplied terminal action; termination lives in
+FSM transitions rather than inside the module.
 
 Usage::
 
@@ -91,16 +89,15 @@ def wait_until(
           ├── (<name>_attempts >= max-1)     → on_timeout
           └── <name>_wait (sleep + ++count)  → <name>_check
 
-    The ``check`` argument is a normal ``@module_action`` (or any Burr
-    ``@action``) the caller has already built — typically a shell/uri/wait_for
+    The ``check`` argument is a ``@module_action`` (or any Burr ``@action``)
+    that the caller has already built. Typically a shell, uri, or wait_for
     call that writes a result the ``condition_expr`` references.
     ``condition_expr`` is a Python expression evaluated against state via
     Burr's standard ``expr`` builder.
 
     On timeout the FSM routes to ``on_timeout``; on success to ``on_success``.
     These are action names the caller registers separately. The wait sub-graph
-    contains no escalation logic of its own — escalation is a graph-level
-    concern.
+    has no escalation logic of its own; escalation is a graph-level concern.
     """
     check_name = f"{name}_check"
     wait_name = f"{name}_wait"

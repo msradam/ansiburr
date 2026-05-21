@@ -176,7 +176,7 @@ def report(state: State) -> State:
 
 
 def build_application() -> Application:
-    """Same transition graph as burr-mcp/examples/coffee_order.py — verbatim."""
+    """Same transition graph as burr-mcp/examples/coffee_order.py, verbatim."""
     ordered = Condition.expr("stage == 'ordered'")
     paid = Condition.expr("stage == 'paid'")
     return (

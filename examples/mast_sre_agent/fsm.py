@@ -1,15 +1,16 @@
-"""MAST-aligned SRE agent with deep multi-module remediation sub-graphs.
+"""MAST-aligned SRE agent with multi-module remediation sub-graphs.
 
-Implements architectural recommendations from IBM Research + UC Berkeley,
+Implements architectural recommendations from IBM Research and UC Berkeley,
 "Why Enterprise Agents Fail in the Real World"
 (https://huggingface.co/blog/ibm-research/itbenchandmast). The paper studied
-310 SRE traces and built MAST, a 14-failure-mode taxonomy. Their headline:
-**architectural fixes recover ~53% of failures, prompt engineering ~15.6%.**
+310 SRE traces and built MAST, a 14-failure-mode taxonomy. Headline result:
+architectural fixes recovered ~53% of failures versus ~15.6% from prompt
+engineering alone.
 
-This demo is the architectural-fixes side, expressed as a Burr FSM where the
-LLM is the brain (pick a remediation strategy) and Ansible is the hands
-(execute the multi-step idempotent fix). Each remediation branch is a
-sub-graph of 5-6 Ansible module calls, not a single shell-out.
+This demo is the architectural-fixes side of the finding. The LLM chooses
+a remediation strategy. Ansible executes the multi-step idempotent fix.
+Each remediation branch is a sub-graph of five or six Ansible module
+calls, not a single shell-out.
 
 Topology::
 
@@ -102,7 +103,7 @@ MAX_ATTEMPTS_PER_REMEDIATION = 1
 
 
 # ---------------------------------------------------------------------------
-# Connection profile via ``host()`` — captured ONCE, used by every
+# Connection profile via ``host()``. Captured once, used by every
 # Ansible-backed action below. Without this the 8-line connection dict
 # would appear on each of the 12+ module actions.
 # ---------------------------------------------------------------------------
@@ -346,7 +347,7 @@ def record_attempt(state: State) -> State:
 
 
 # ---------------------------------------------------------------------------
-# OOM remediation sub-graph — 6 Ansible module calls in idempotent sequence.
+# OOM remediation sub-graph: 6 Ansible module calls in idempotent sequence.
 # Each is a granular Burr node so the tracker shows every step independently.
 # ---------------------------------------------------------------------------
 
@@ -358,9 +359,9 @@ def oom_constrain_workers(state: State) -> dict[str, Any]:
     ``lineinfile`` is the canonical Ansible way to change one directive in a
     multi-line config: it matches by regex, replaces (or inserts) the line,
     and writes a timestamped backup. The ``events { worker_connections N; }``
-    block isn't touched — modifying it from a conf.d snippet is illegal
-    (conf.d is http context, events is top-level), so surgical edit of the
-    main file is the right tool.
+    block isn't touched. Modifying it from a conf.d snippet is illegal
+    (conf.d is http context, events is top-level), so a surgical edit of
+    the main file is the appropriate tool.
     """
     return {
         "path": "/etc/nginx/nginx.conf",
@@ -373,9 +374,9 @@ def oom_constrain_workers(state: State) -> dict[str, Any]:
 @target.module("ansible.builtin.lineinfile")
 def oom_shrink_buffers(state: State) -> dict[str, Any]:
     """Inside http context: cap request body buffer to reduce per-connection
-    memory. This one writes to conf.d/ — http-context directives are legal
-    there. Idempotent: ``lineinfile`` with the same regex+line is a no-op
-    on the second run."""
+    memory. Writes to conf.d/ where http-context directives are legal.
+    Idempotent: ``lineinfile`` with the same regex+line is a no-op on the
+    second run."""
     return {
         "path": NGINX_LIMITS_CONF,
         "regexp": r"^\s*client_body_buffer_size\s",
@@ -410,8 +411,8 @@ def oom_verify_workers(state: State) -> dict[str, Any]:
 def log_incident_oom(state: State) -> dict[str, Any]:
     """Append the incident to a structured ledger that ops can grep later.
 
-    Uses ``community.general.ini_file`` rather than blindly appending text —
-    the module is idempotent per (section, option), so re-running this
+    Uses ``community.general.ini_file`` rather than blindly appending text.
+    The module is idempotent per (section, option), so re-running this
     action with the same key updates rather than duplicating.
     """
     ts = datetime.now().isoformat(timespec="seconds")
@@ -426,7 +427,7 @@ def log_incident_oom(state: State) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Disk-full remediation sub-graph — 6 Ansible module calls.
+# Disk-full remediation sub-graph: 6 Ansible module calls.
 # ---------------------------------------------------------------------------
 
 

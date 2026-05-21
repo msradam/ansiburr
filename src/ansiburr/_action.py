@@ -95,9 +95,10 @@ def module_action(
     and ``_last_msg`` (Ansible's diagnostic message on failure). Transitions
     can branch on these without each action having to opt-in via ``writes``.
 
-    ``check_mode=True`` runs the module in dry-run: it reports what it WOULD
-    change without making changes. Pair with ``diff=True`` to also capture
-    structured before/after content. Useful for plan-before-apply patterns.
+    ``check_mode=True`` runs the module in dry-run mode: it reports what it
+    would change without making changes. Pair with ``diff=True`` to also
+    capture structured before/after content. Useful for plan-before-apply
+    patterns.
 
     ``connection`` is an optional dict of Ansible hostvars (``ansible_host``,
     ``ansible_port``, ``ansible_user``, ``ansible_ssh_private_key_file``,

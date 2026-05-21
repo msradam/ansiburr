@@ -1,18 +1,16 @@
-"""Log triage FSM: Ansible I/O bookending two non-Ansible decision nodes.
+"""Log triage FSM with two non-Ansible decision nodes between Ansible I/O.
 
-The point of this demo is to show **non-Ansible actions interleaved with
-Ansible actions** in the same Burr graph, both kinds the user explicitly
-called out as missing:
+Non-Ansible actions interleaved with Ansible-backed I/O in one Burr graph:
 
-1. ``parse_events`` — a plain Python ``@action`` that does regex + dateutil
-   work to turn raw log text into structured records. In a real Ansible
-   playbook this would be Jinja2 ``regex_findall`` plus ``selectattr``
-   gymnastics, or a shelled-out ``awk`` pipeline. In ansiburr it's a
-   normal Python function.
+1. ``parse_events`` is a plain Python ``@action`` that does regex and
+   datetime work to turn raw log text into structured records. The
+   equivalent in a playbook would be Jinja2 ``regex_findall`` plus
+   ``selectattr``, or a shelled-out ``awk`` pipeline.
 
-2. ``classify_with_llm`` — a plain Python ``@action`` that calls
-   IBM Granite 4 350m over the Ollama HTTP API to classify the dominant
-   failure signature. Tiny model (350M params), runs locally in ~1s.
+2. ``classify_with_llm`` is a plain Python ``@action`` that calls IBM
+   Granite 4 350m over the Ollama HTTP API to classify the dominant
+   failure signature. The model is 350M parameters and runs locally
+   in roughly one second.
 
 Both sit between Ansible-backed I/O (``slurp`` to read the log, ``service``
 and ``shell`` to remediate, ``uri`` to verify). The graph::
@@ -23,16 +21,15 @@ and ``shell`` to remediate, ``uri`` to verify). The graph::
         +--(disk_full)------> clear_temp_files --+--> verify_endpoint
         +--(other/unknown)--------------------------> escalate
 
-The production-safe pattern: the LLM picks among a fixed allow-list of
-remediation actions; ``validate`` is deterministic and routes ``unknown``
-to escalate. The LLM never generates shell or chooses an unbounded
-action — it only picks a label, and ansiburr maps labels to
-pre-defined Ansible-backed nodes.
+The LLM picks one label from a fixed allow-list. ``validate`` is
+deterministic and routes off-list responses to escalate. The LLM never
+generates shell and never chooses an unbounded action; it picks a label,
+and ansiburr maps labels to pre-defined Ansible-backed nodes.
 
 Container: reuses ``examples/service_remediation`` setup. Prereq:
-``ollama pull ibm/granite4:350m`` + ``ollama serve`` running.
+``ollama pull ibm/granite4:350m`` plus ``ollama serve`` running.
 
-Run-of-show::
+Run::
 
     cd ../service_remediation && ./start.sh
     uv run python ../log_triage/fsm.py

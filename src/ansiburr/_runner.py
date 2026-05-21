@@ -15,7 +15,7 @@ import yaml
 # Cross-process stable ControlPath so all ansiburr-issued SSH sessions to the
 # same (host, port, user) tuple share one multiplexed connection. Without this
 # every @module_action does a fresh handshake; with it, only the first action
-# in a sequence pays handshake cost — subsequent calls multiplex through the
+# in a sequence pays handshake cost. Subsequent calls multiplex through the
 # persistent master for ``ControlPersist`` seconds.
 _ANSIBURR_CONTROL_DIR = Path.home() / ".ssh" / ".ansiburr-cm"
 _DEFAULT_SSH_ARGS = (
@@ -60,11 +60,11 @@ def run_module(
     When ``connection`` is None and ``host`` is localhost, ``ansible_connection=local``
     is set so no ssh round-trip is needed.
 
-    ``check_mode=True`` makes the module report what it WOULD change without
-    making changes (equivalent to ``ansible-playbook --check``). Pairs with
-    ``diff=True`` which makes the module return a structured before/after
-    diff under the ``diff`` key. Together they're the "plan before apply"
-    primitive — see the MAST paper recommendation to externalize verification.
+    ``check_mode=True`` makes the module report what it would change without
+    making changes (equivalent to ``ansible-playbook --check``). Pair with
+    ``diff=True`` to also capture structured before/after content under the
+    result's ``diff`` key. Together they implement the plan-before-apply
+    pattern.
 
     The result always includes Ansible's diagnostic fields on failure
     (``failed``, ``msg``, optionally ``unreachable``) so callers can branch

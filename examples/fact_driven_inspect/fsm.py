@@ -1,9 +1,8 @@
-"""Fact-driven inspection FSM: same graph, distro-correct execution.
+"""Fact-driven inspection FSM. Same graph, distro-correct execution.
 
-The whole point of this demo is to show what changes when we treat
-Ansible's ``gather_facts`` as Burr State expansion. The FSM has no
-hard-coded Debian assumptions; it asks the target host what it is,
-then branches the rest of the work accordingly.
+Treats Ansible's ``gather_facts`` as Burr State expansion. The FSM
+has no hard-coded Debian assumptions; it asks the target host what
+it is, then branches the rest of the work accordingly.
 
 Topology::
 
@@ -14,14 +13,14 @@ Topology::
 
 Each inspect action runs the distro-appropriate package-listing command and
 uses ``register="pkg_inspect"`` to capture the entire module result
-(stdout/rc/cmd/delta) — the Ansible idiom for "I want the whole dict, not
-just one field." ``summarize`` is a plain Python ``@action`` that reads
-both the gathered facts AND the registered result to produce a final report.
+(stdout, rc, cmd, delta). ``summarize`` is a plain Python ``@action`` that
+reads both the gathered facts and the registered result to produce a final
+report.
 
 Library features exercised:
-  - ``Host.gather_facts()`` — state-expansion of ansible_facts into top-level keys
-  - ``Host.initial_facts()`` — seed placeholders for reads pre-gather
-  - ``register="..."`` on a Host module — capture the whole result dict
+  - ``Host.gather_facts()``: state-expansion of ansible_facts into top-level keys
+  - ``Host.initial_facts()``: seed placeholders so reads resolve pre-gather
+  - ``register="..."`` on a Host module: capture the whole result dict
   - Branching transitions on fact values via ``expr("ansible_pkg_mgr == 'apt'")``
 
 Run::

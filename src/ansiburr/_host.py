@@ -1,11 +1,10 @@
-"""``host()`` — a small connection profile that captures hostvars once and emits
-configured ``@module_action`` decorators bound to that host.
+"""``host()``: a connection profile that captures Ansible hostvars once and
+produces ``@module_action`` decorators bound to that host.
 
-Without this, every ``@module_action`` targeting the same remote repeats the
+Without it, every ``@module_action`` targeting the same remote repeats the
 connection dict (``ansible_host``, ``ansible_port``, ``ansible_user``,
 ``ansible_ssh_private_key_file``, ``ansible_python_interpreter``, become flags).
-With it, a single ``Host`` captures that once and every action is one line of
-intent::
+With it, the connection is declared once::
 
     target = ansiburr.host("oom-target", ansible_host="127.0.0.1", ...)
 
@@ -13,16 +12,15 @@ intent::
     def restart_nginx(state):
         return {"name": "nginx", "state": "restarted"}
 
-The Host also exposes ``.shell``, ``.command``, ``.copy``, ``.template``,
-``.file``, ``.systemd``, ``.service``, ``.uri``, ``.slurp``, ``.find`` as
-shorthands for the most common ``ansible.builtin`` modules.
+``Host`` exposes ``.shell``, ``.command``, ``.copy``, ``.template``, ``.file``,
+``.systemd``, ``.service``, ``.uri``, ``.slurp``, ``.find`` as shorthands for
+common ``ansible.builtin`` modules.
 
 ``Host.gather_facts()`` runs ``ansible.builtin.setup`` and flattens its
-``ansible_facts`` payload into top-level State keys — bringing Ansible's
-fact/var model into Burr's State the way they were always conceptually
-aligned (gather_facts is, structurally, just "observe the world and populate
-state with what you found"). ``Host.initial_facts()`` seeds placeholder
-values so transitions can read those keys before gather_facts has run.
+``ansible_facts`` payload into top-level State keys, so transitions can branch
+on facts like ``ansible_pkg_mgr`` or ``ansible_os_family`` directly.
+``Host.initial_facts()`` seeds placeholder values for those keys so reads can
+resolve before the first gather has run.
 """
 
 from __future__ import annotations
@@ -71,8 +69,9 @@ class Host:
     """Connection profile bound to a single inventory host.
 
     All fields except ``name`` map to standard Ansible hostvars (the same dict
-    you'd pass as ``connection=`` to ``@module_action``). ``become`` is hoisted
-    to the dataclass because it's a per-action play-level setting, not a hostvar.
+    a caller would pass as ``connection=`` to ``@module_action``). ``become``
+    is a dataclass field rather than a hostvar because it is a play-level
+    setting in Ansible's model, not a connection variable.
     """
 
     name: str

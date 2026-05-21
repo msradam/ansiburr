@@ -1,13 +1,12 @@
-"""Plan-then-apply FSM: every change is previewed in check+diff mode,
-reviewed by a deterministic (or LLM-driven) policy, then either applied
-for real or escalated.
+"""Plan-then-apply FSM. Every change is previewed in check+diff mode,
+reviewed by a deterministic or LLM-driven policy, then either applied for
+real or escalated.
 
-This is the MAST paper's "force clarification" recommendation (FM-2.2),
-realized with Ansible's native ``--check`` + ``--diff`` primitives. The
-review action reads the structured diff that ``--diff`` produces, applies
-policy, and decides whether the apply step gets to run. Same module
-configuration is used for both plan and apply — only ``check_mode``
-flips.
+Maps to the MAST paper's force-clarification recommendation (FM-2.2)
+using Ansible's ``--check`` and ``--diff`` primitives. The review action
+reads the structured diff the plan step produced, applies policy, and
+decides whether the apply step runs. The same module configuration is
+used for both plan and apply; only ``check_mode`` flips.
 
 Topology::
 
@@ -123,10 +122,10 @@ def review_plan(state: State) -> State:
     """Deterministic policy applied to the plan's diff.
 
     Replace this with an LLM consultation, a human-approval hook, or an
-    OPA/Rego policy as needed. The MAST paper's recommendation is to make
-    this gate *external* to the LLM, regardless of its specific implementation
-    — what matters is that an Ansible action doesn't run on production
-    until something other than the actor that proposed it has approved.
+    OPA/Rego policy as needed. The MAST recommendation is to keep this
+    gate external to the LLM, regardless of implementation. The contract
+    is: an Ansible action does not run on production until something
+    other than the actor that proposed it has approved.
     """
     if state["_last_failed"]:
         return state.update(
