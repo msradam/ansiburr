@@ -188,11 +188,13 @@ def run_module(
             raise KeyboardInterrupt
 
         result = _extract_result(runner)
-        if runner.status == "timeout" and "failed" not in result:
+        if runner.status == "timeout":
+            # Overwrite (don't just setdefault) so the classifier downstream can
+            # match the well-known "exceeded timeout" phrase regardless of what
+            # ansible-playbook itself emitted on its way out.
             result["failed"] = True
-            result.setdefault(
-                "msg",
-                f"ansible-playbook exceeded timeout of {timeout}s and was terminated",
+            result["msg"] = (
+                f"ansible-playbook exceeded timeout of {timeout}s and was terminated"
             )
         return result
 

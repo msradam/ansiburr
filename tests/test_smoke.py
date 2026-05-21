@@ -18,8 +18,14 @@ def test_public_exports_stable() -> None:
     # If anything in __all__ is removed or renamed, this catches it.
     expected = {
         "DEFAULT_FACT_KEYS",
-        "SENTINEL_KEYS",
+        "FAILURE_KINDS",
+        "FAILURE_KIND_AUTH_FAILED",
+        "FAILURE_KIND_MODULE_ERROR",
+        "FAILURE_KIND_OK",
+        "FAILURE_KIND_TIMEOUT",
+        "FAILURE_KIND_UNREACHABLE",
         "Host",
+        "SENTINEL_KEYS",
         "UnsupportedPlaybookConstruct",
         "WaitGraph",
         "__version__",
@@ -44,6 +50,7 @@ def test_initial_sentinels_shape() -> None:
         "_last_changed": False,
         "_last_unreachable": False,
         "_last_msg": "",
+        "_last_failure_kind": ansiburr.FAILURE_KIND_OK,
     }
 
 

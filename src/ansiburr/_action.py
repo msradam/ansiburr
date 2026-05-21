@@ -19,7 +19,58 @@ SENTINEL_KEYS = (
     "_last_changed",
     "_last_unreachable",
     "_last_msg",
+    "_last_failure_kind",
 )
+
+# Classified failure modes ansiburr distinguishes structurally. The labels
+# are loosely aligned with the MAST taxonomy (Multi-Agent System failure
+# Taxonomy, IBM Research + UC Berkeley, arXiv:2503.13657), restricted to
+# the modes a deterministic FSM can detect from an Ansible module result
+# without needing an LLM judge. Transitions can branch on these to take
+# distinct recovery paths: retry-with-backoff for ``unreachable``, escalate
+# immediately for ``auth_failed``, alternative-module fallback for
+# ``module_error``, longer timeout next try for ``timeout``.
+FAILURE_KIND_OK = "ok"
+FAILURE_KIND_UNREACHABLE = "unreachable"
+FAILURE_KIND_AUTH_FAILED = "auth_failed"
+FAILURE_KIND_TIMEOUT = "timeout"
+FAILURE_KIND_MODULE_ERROR = "module_error"
+
+FAILURE_KINDS = (
+    FAILURE_KIND_OK,
+    FAILURE_KIND_UNREACHABLE,
+    FAILURE_KIND_AUTH_FAILED,
+    FAILURE_KIND_TIMEOUT,
+    FAILURE_KIND_MODULE_ERROR,
+)
+
+
+def _classify_failure(result: Mapping[str, Any]) -> str:
+    """Map an Ansible module result dict to one of :data:`FAILURE_KINDS`.
+
+    The classification is conservative and pattern-based: ``unreachable`` and
+    ``failed`` flags are trusted; the diagnostic ``msg`` is scanned for
+    well-known phrases ansible-playbook emits for auth failure and timeout
+    cases. Anything that failed but doesn't fit the named categories is
+    ``module_error``. Anything that didn't fail is ``ok``.
+    """
+    if result.get("unreachable"):
+        return FAILURE_KIND_UNREACHABLE
+    if not result.get("failed"):
+        return FAILURE_KIND_OK
+    msg = str(result.get("msg") or "").lower()
+    # ansible-runner's timeout path lands here via run_module's overrun fallback;
+    # the message is "ansible-playbook exceeded timeout of Ns ..."
+    if "exceeded timeout" in msg or msg.startswith("timed out"):
+        return FAILURE_KIND_TIMEOUT
+    # OpenSSH and ansible itself emit these on auth failures.
+    if (
+        "permission denied" in msg
+        or "authentication failed" in msg
+        or ("publickey" in msg and "denied" in msg)
+    ):
+        return FAILURE_KIND_AUTH_FAILED
+    return FAILURE_KIND_MODULE_ERROR
 
 
 def initial_sentinels() -> dict[str, Any]:
@@ -35,6 +86,7 @@ def initial_sentinels() -> dict[str, Any]:
         "_last_changed": False,
         "_last_unreachable": False,
         "_last_msg": "",
+        "_last_failure_kind": FAILURE_KIND_OK,
     }
 
 
@@ -171,6 +223,7 @@ def module_action(
             update["_last_changed"] = bool(result.get("changed"))
             update["_last_unreachable"] = bool(result.get("unreachable"))
             update["_last_msg"] = str(result.get("msg") or "")
+            update["_last_failure_kind"] = _classify_failure(result)
             # Return (result, state) so Burr's tracker captures the full Ansible
             # module output (stdout/stderr/rc/diff/changed/...) alongside the state
             # snapshot. State alone would drop the rich payload: a 300-line

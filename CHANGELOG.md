@@ -6,6 +6,39 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.5] - 2026-05-21
+
+### Added
+
+- ``_last_failure_kind`` sentinel populated on every ``@module_action`` call.
+  Classifies the result into one of ``ok``, ``unreachable``, ``auth_failed``,
+  ``timeout``, or ``module_error``. Lets transitions take distinct recovery
+  paths per failure mode without grepping ``_last_msg``: e.g. retry on
+  ``unreachable``, escalate immediately on ``auth_failed``, fall back to an
+  alternative module on ``module_error``, raise the timeout next try on
+  ``timeout``. Loosely aligned with the MAST taxonomy (Multi-Agent System
+  failure Taxonomy, IBM Research + UC Berkeley, arXiv:2503.13657) restricted
+  to modes a deterministic FSM can detect from an Ansible result.
+- Exported as module-level constants: ``ansiburr.FAILURE_KIND_OK``,
+  ``FAILURE_KIND_UNREACHABLE``, ``FAILURE_KIND_AUTH_FAILED``,
+  ``FAILURE_KIND_TIMEOUT``, ``FAILURE_KIND_MODULE_ERROR``, plus the
+  ``FAILURE_KINDS`` tuple. Pattern: use the constants in transition
+  predicates rather than string literals for typo-safety.
+- ``initial_sentinels()`` seeds ``_last_failure_kind="ok"``.
+- Four new tests in ``test_failures.py`` covering: ok on success,
+  module_error on intentional fail, timeout on runner cap overrun, and
+  branching a transition on the kind.
+
+### Documented
+
+- The classification is conservative and pattern-based: ``unreachable``
+  trusts ansible's flag; ``auth_failed`` matches "permission denied" /
+  "authentication failed" / publickey-denied phrases in ``msg``;
+  ``timeout`` matches "exceeded timeout" / "timed out"; anything else that
+  failed lands in ``module_error``. False negatives on auth_failed against
+  exotic SSH error wording fall through to ``module_error``, which still
+  routes correctly through any failure-handling branch.
+
 ## [0.0.4] - 2026-05-21
 
 The converter now ingests the constructs every popular community Ansible
@@ -162,4 +195,5 @@ Initial alpha release.
 [0.0.2]: https://github.com/msradam/ansiburr/releases/tag/v0.0.2
 [0.0.3]: https://github.com/msradam/ansiburr/releases/tag/v0.0.3
 [0.0.4]: https://github.com/msradam/ansiburr/releases/tag/v0.0.4
-[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.4...HEAD
+[0.0.5]: https://github.com/msradam/ansiburr/releases/tag/v0.0.5
+[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.5...HEAD

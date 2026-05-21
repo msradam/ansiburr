@@ -41,6 +41,12 @@ Burr directly (``with_state``, ``@action``, ``expr``).
 from importlib.metadata import PackageNotFoundError, version
 
 from ansiburr._action import (
+    FAILURE_KIND_AUTH_FAILED,
+    FAILURE_KIND_MODULE_ERROR,
+    FAILURE_KIND_OK,
+    FAILURE_KIND_TIMEOUT,
+    FAILURE_KIND_UNREACHABLE,
+    FAILURE_KINDS,
     SENTINEL_KEYS,
     initial_sentinels,
     module_action,
@@ -61,6 +67,12 @@ except PackageNotFoundError:
 
 __all__ = [
     "DEFAULT_FACT_KEYS",
+    "FAILURE_KINDS",
+    "FAILURE_KIND_AUTH_FAILED",
+    "FAILURE_KIND_MODULE_ERROR",
+    "FAILURE_KIND_OK",
+    "FAILURE_KIND_TIMEOUT",
+    "FAILURE_KIND_UNREACHABLE",
     "SENTINEL_KEYS",
     "Host",
     "UnsupportedPlaybookConstruct",

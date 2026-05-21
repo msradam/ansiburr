@@ -225,6 +225,110 @@ def test_module_action_timeout_terminates_subprocess() -> None:
     assert final["_last_failed"] is True
 
 
+def test_failure_kind_ok_for_successful_module() -> None:
+    """A module that succeeds populates _last_failure_kind='ok'."""
+
+    @ansiburr.module_action("ansible.builtin.ping")
+    def ping(state):
+        return {}
+
+    @action(reads=["_last_failure_kind"], writes=["kind"])
+    def report(state):
+        return state.update(kind=state["_last_failure_kind"])
+
+    app = (
+        ApplicationBuilder()
+        .with_actions(ping=ping, report=report)
+        .with_transitions(("ping", "report"))
+        .with_state(**ansiburr.initial_sentinels(), kind="")
+        .with_entrypoint("ping")
+        .build()
+    )
+    _, _, final = app.run(halt_after=["report"])
+    assert final["kind"] == ansiburr.FAILURE_KIND_OK
+
+
+def test_failure_kind_module_error_for_intentional_fail() -> None:
+    """ansible.builtin.fail produces _last_failure_kind='module_error'."""
+
+    @ansiburr.module_action("ansible.builtin.fail")
+    def boom(state):
+        return {"msg": "no auth wording here, just a failure"}
+
+    @action(reads=["_last_failure_kind"], writes=["kind"])
+    def report(state):
+        return state.update(kind=state["_last_failure_kind"])
+
+    app = (
+        ApplicationBuilder()
+        .with_actions(boom=boom, report=report)
+        .with_transitions(("boom", "report"))
+        .with_state(**ansiburr.initial_sentinels(), kind="")
+        .with_entrypoint("boom")
+        .build()
+    )
+    _, _, final = app.run(halt_after=["report"])
+    assert final["kind"] == ansiburr.FAILURE_KIND_MODULE_ERROR
+
+
+def test_failure_kind_timeout_when_runner_exceeds_cap() -> None:
+    """A module timeout (caught by run_module's cap) produces 'timeout'."""
+
+    @ansiburr.module_action("ansible.builtin.shell", timeout=2)
+    def hang(state):
+        return {"cmd": "sleep 30"}
+
+    @action(reads=["_last_failure_kind"], writes=["kind"])
+    def report(state):
+        return state.update(kind=state["_last_failure_kind"])
+
+    app = (
+        ApplicationBuilder()
+        .with_actions(hang=hang, report=report)
+        .with_transitions(("hang", "report"))
+        .with_state(**ansiburr.initial_sentinels(), kind="")
+        .with_entrypoint("hang")
+        .build()
+    )
+    _, _, final = app.run(halt_after=["report"])
+    assert final["kind"] == ansiburr.FAILURE_KIND_TIMEOUT
+
+
+def test_failure_kind_transition_can_branch_on_kind() -> None:
+    """The classification value is usable as a Burr transition predicate."""
+
+    @ansiburr.module_action("ansible.builtin.fail")
+    def boom(state):
+        return {"msg": "any module-level error"}
+
+    @action(reads=[], writes=["outcome"])
+    def take_unreachable_path(state):
+        return state.update(outcome="UNREACHABLE")
+
+    @action(reads=[], writes=["outcome"])
+    def take_module_error_path(state):
+        return state.update(outcome="MODULE_ERROR")
+
+    app = (
+        ApplicationBuilder()
+        .with_actions(
+            boom=boom,
+            take_unreachable_path=take_unreachable_path,
+            take_module_error_path=take_module_error_path,
+        )
+        .with_transitions(
+            ("boom", "take_unreachable_path", expr("_last_failure_kind == 'unreachable'")),
+            ("boom", "take_module_error_path"),
+        )
+        .with_state(**ansiburr.initial_sentinels(), outcome="")
+        .with_entrypoint("boom")
+        .build()
+    )
+    last, _, final = app.run(halt_after=["take_unreachable_path", "take_module_error_path"])
+    assert last.name == "take_module_error_path"
+    assert final["outcome"] == "MODULE_ERROR"
+
+
 def test_bad_module_args_fails_cleanly() -> None:
     """An invalid argument to a real module must surface as _last_failed=True
     with a useful _last_msg, not raise."""
