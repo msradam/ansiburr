@@ -14,7 +14,9 @@ that doesn't make it into the event stream.
 
 from __future__ import annotations
 
+import atexit
 import os
+import shutil
 import signal
 import sys
 import tempfile
@@ -24,6 +26,53 @@ from typing import Any
 
 import ansible_runner  # type: ignore[import-untyped]
 import yaml
+
+# Process-level persistent private_data_dir. Created lazily on the first
+# run_module call, torn down at interpreter exit. Reusing the directory
+# across module calls saves ~50-100ms per action from the filesystem
+# materialization overhead (mkdir + write inventory + write playbook +
+# rmtree). The trade-off: a multi-host playbook can no longer assume each
+# call has a pristine inventory, so the inventory file is rewritten on
+# every call rather than left stale.
+#
+# Setting ``ANSIBURR_NO_REUSE_DATA_DIR=1`` falls back to per-call tempdirs,
+# which is useful for debugging or when multiple Applications run concurrently
+# from the same process (which is otherwise unsupported per the module
+# docstring).
+_PERSISTENT_DATA_DIR: Path | None = None
+
+
+def _no_reuse_data_dir() -> bool:
+    return os.environ.get("ANSIBURR_NO_REUSE_DATA_DIR", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+def _get_persistent_data_dir() -> Path:
+    """Return the process-wide private_data_dir, creating it on first use
+    and registering an atexit cleanup. Each call wipes the inventory/host_vars
+    and project/playbook.yml so stale content from a previous module call
+    can't leak into the next one."""
+    global _PERSISTENT_DATA_DIR
+    if _PERSISTENT_DATA_DIR is None:
+        path = Path(tempfile.mkdtemp(prefix="ansiburr-persistent-"))
+        atexit.register(_cleanup_persistent_data_dir, path)
+        _PERSISTENT_DATA_DIR = path
+    # Fresh inventory + project on every call. The directory itself stays.
+    inv_dir = _PERSISTENT_DATA_DIR / "inventory"
+    if inv_dir.exists():
+        shutil.rmtree(inv_dir)
+    project_dir = _PERSISTENT_DATA_DIR / "project"
+    if project_dir.exists():
+        shutil.rmtree(project_dir)
+    return _PERSISTENT_DATA_DIR
+
+
+def _cleanup_persistent_data_dir(path: Path) -> None:
+    if path.exists():
+        shutil.rmtree(path, ignore_errors=True)
 
 # Cross-process stable ControlPath so all ansiburr-issued SSH sessions to the
 # same (host, port, user) tuple share one multiplexed connection. Without this
@@ -104,9 +153,19 @@ def run_module(
     (``failed``, ``msg``, optionally ``unreachable``) so callers can branch
     on them via Burr transitions instead of catching exceptions.
     """
-    with tempfile.TemporaryDirectory(prefix="ansiburr-") as tmp:
+    # Reuse the process-wide persistent dir by default. Per-call tempdirs
+    # only happen when explicitly disabled via the env var; the persistent
+    # path saves ~50-100ms per call from filesystem materialization.
+    if _no_reuse_data_dir():
+        ctx = tempfile.TemporaryDirectory(prefix="ansiburr-")
+        tmp = ctx.__enter__()
+        cleanup_ctx: Any = ctx
         tmp_path = Path(tmp)
+    else:
+        tmp_path = _get_persistent_data_dir()
+        cleanup_ctx = None
 
+    try:
         inv_dir = tmp_path / "inventory"
         inv_dir.mkdir()
         (inv_dir / "hosts").write_text(f"{host}\n")
@@ -193,10 +252,11 @@ def run_module(
             # match the well-known "exceeded timeout" phrase regardless of what
             # ansible-playbook itself emitted on its way out.
             result["failed"] = True
-            result["msg"] = (
-                f"ansible-playbook exceeded timeout of {timeout}s and was terminated"
-            )
+            result["msg"] = f"ansible-playbook exceeded timeout of {timeout}s and was terminated"
         return result
+    finally:
+        if cleanup_ctx is not None:
+            cleanup_ctx.__exit__(None, None, None)
 
 
 def _extract_result(runner: Any) -> dict[str, Any]:

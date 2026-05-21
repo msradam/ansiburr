@@ -6,6 +6,25 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.22] - 2026-05-21
+
+### Changed
+
+- ``run_module`` now reuses a single process-wide ``private_data_dir``
+  across calls instead of creating and tearing down a fresh tempdir for
+  each module invocation. Saves roughly 20ms per call from filesystem
+  materialization overhead (mkdir, write inventory, write playbook,
+  rmtree). The inventory and project subdirs are wiped between calls so
+  no stale content leaks. The dir itself is cleaned up at interpreter
+  exit via ``atexit``. Measured savings: ~3% of wall-clock latency per
+  ping call (612ms persistent vs 633ms per-call tempdir); the absolute
+  ansible-runner overhead dominates either way, but the savings compound
+  on long FSMs.
+- ``ANSIBURR_NO_REUSE_DATA_DIR=1`` falls back to per-call tempdirs.
+  Useful for debugging or when multiple Applications run concurrently
+  from the same process (which the runner module docstring already
+  flags as unsupported).
+
 ## [0.0.21] - 2026-05-21
 
 The last geerling holdout closes. **All six** of the most-downloaded
@@ -639,4 +658,5 @@ Initial alpha release.
 [0.0.19]: https://github.com/msradam/ansiburr/releases/tag/v0.0.19
 [0.0.20]: https://github.com/msradam/ansiburr/releases/tag/v0.0.20
 [0.0.21]: https://github.com/msradam/ansiburr/releases/tag/v0.0.21
-[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.21...HEAD
+[0.0.22]: https://github.com/msradam/ansiburr/releases/tag/v0.0.22
+[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.22...HEAD
