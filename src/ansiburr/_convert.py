@@ -124,6 +124,10 @@ _RESERVED_TASK_KEYS: frozenset[str] = frozenset(
         # the env vars are load-bearing, the converted FSM will need a
         # manual touch-up.
         "environment",
+        # ``loop_control:`` only modifies loop output (``label:``, ``pause:``,
+        # ``extended:``). Safely ignored at conversion time; the loop still
+        # iterates as authored.
+        "loop_control",
     }
 )
 
@@ -145,7 +149,6 @@ _UNSUPPORTED_TASK_KEYS: frozenset[str] = frozenset(
     {
         "rescue",
         "always",
-        "loop_control",
         "with_dict",
         "with_fileglob",
         "with_subelements",

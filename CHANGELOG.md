@@ -6,6 +6,27 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.18] - 2026-05-21
+
+Five of the six most-downloaded geerlingguy roles now convert:
+
+  ansible-role-docker      63 actions, 205 transitions
+  ansible-role-nginx       40 actions, 153 transitions
+  ansible-role-mysql       78 actions, 265 transitions
+  ansible-role-postgresql  63 actions, 186 transitions
+  ansible-role-redis       13 actions,  27 transitions
+
+ansible-role-php is the last holdout, blocked on ``with_subelements:``
+(nested-iteration lookup).
+
+### Added
+
+- ``loop_control:`` (Ansible's loop modifier with ``label:``, ``pause:``,
+  ``extended:`` etc.) moved from unsupported to reserved. The fields
+  are purely cosmetic (output labels and pacing) and don't affect the
+  iteration semantics ansiburr emits, so silently ignoring them lets
+  the surrounding ``loop:`` convert.
+
 ## [0.0.17] - 2026-05-21
 
 Four of the six most-downloaded geerlingguy roles now convert cleanly
@@ -542,4 +563,5 @@ Initial alpha release.
 [0.0.15]: https://github.com/msradam/ansiburr/releases/tag/v0.0.15
 [0.0.16]: https://github.com/msradam/ansiburr/releases/tag/v0.0.16
 [0.0.17]: https://github.com/msradam/ansiburr/releases/tag/v0.0.17
+[0.0.18]: https://github.com/msradam/ansiburr/releases/tag/v0.0.18
 [Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.17...HEAD
