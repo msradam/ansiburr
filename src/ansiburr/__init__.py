@@ -38,6 +38,8 @@ expansion and ``register=`` for full-result capture. The rest is supported by
 Burr directly (``with_state``, ``@action``, ``expr``).
 """
 
+from importlib.metadata import PackageNotFoundError, version
+
 from ansiburr._action import (
     SENTINEL_KEYS,
     initial_sentinels,
@@ -48,11 +50,20 @@ from ansiburr._host import DEFAULT_FACT_KEYS, Host, host
 from ansiburr._runner import run_module
 from ansiburr._wait import WaitGraph, wait_until
 
+try:
+    __version__ = version("ansiburr")
+except PackageNotFoundError:
+    # Running from a source checkout without an installed dist (e.g. tests in
+    # CI before ``uv sync``). Fall back to a sentinel that's obviously not a
+    # released version.
+    __version__ = "0+unknown"
+
 __all__ = [
     "DEFAULT_FACT_KEYS",
     "SENTINEL_KEYS",
     "Host",
     "WaitGraph",
+    "__version__",
     "host",
     "initial_sentinels",
     "module_action",

@@ -10,13 +10,20 @@ authors = [
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
+    "Framework :: Ansible",
     "Intended Audience :: Developers",
     "Intended Audience :: System Administrators",
     "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: System :: Systems Administration",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
 ]
 dependencies = [
     "ansible-core>=2.16,<3",
@@ -25,12 +32,20 @@ dependencies = [
     "pyyaml>=6",
 ]
 
+[project.urls]
+Homepage = "https://github.com/amsrahman/ansiburr"
+Source = "https://github.com/amsrahman/ansiburr"
+Issues = "https://github.com/amsrahman/ansiburr/issues"
+
 [build-system]
 requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ansiburr"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/ansiburr/py.typed" = "ansiburr/py.typed"
 
 [dependency-groups]
 dev = [

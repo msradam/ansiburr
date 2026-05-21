@@ -1,26 +1,28 @@
 # ansiburr
 
-Ansible-module-backed Burr state machines.
+Run Ansible modules as Burr state-machine actions in Python.
 
-`ansiburr.module_action` is a decorator that turns a function returning Ansible module arguments into a Burr `@action` that invokes the module via `ansible-runner`. The output is a standard Burr `Application`. Ansible's vars, facts, and registered results map onto Burr's `State`: `gather_facts` flattens facts into top-level state keys, `register:` projects a full module result, `when:` and `failed_when:` become transition predicates, `block / rescue` becomes a guarded sub-graph.
+A single decorator wraps an Ansible module call as a Burr `@action`. The module runs through `ansible-runner` against the target host. Its result projects into Burr's `State`, and the action's `_last_failed`, `_last_changed`, and `_last_msg` flags become available to downstream transitions. The output is a standard Burr `Application` that runs, persists, traces, and serves like any other Burr graph.
 
-## Ansible-to-Burr mapping
+## What you can build
 
-| Ansible playbook idiom | ansiburr / Burr equivalent |
-|---|---|
-| `gather_facts: yes` | `host.gather_facts()` flattens `ansible_facts` into top-level State keys |
-| `vars:` block on a play | `.with_state(**kwargs)` initializer |
-| `set_fact: foo: bar` | pure-Python `@action` doing `state.update(foo="bar")` |
-| `register: result` | `@module_action(register="result")` or `target.shell(register="result")` |
-| `when: cond` | transition predicate `expr("cond")` |
-| `failed_when:` | guard transition on `_last_failed` plus state expressions |
-| `changed_when:` | guard on `_last_changed` plus computed result fields |
-| `block / rescue / always` | guarded transition sub-graph; `rescue:` is an edge gated on `expr("_last_failed")` |
-| `notify:` plus handlers | transition guarded by `expr("_last_changed")` to the handler action |
-| `loop: items` | FSM iteration via state counter and back-edge |
-| `wait_for: ...` | `ansiburr.wait_until(...)` polling sub-graph (each attempt is one Burr step) |
+- Self-healing service workflows that observe, decide, and remediate one Ansible module at a time, with every step visible in Burr's tracker.
+- SRE agents where an LLM picks one label from a fixed allow-list of remediation actions and the FSM (not the model) enforces termination and retry policy.
+- Cross-platform automation that gathers facts on the target up front and dispatches to the right modules based on the OS family, init system, or package manager.
+- Plan-then-apply pipelines using Ansible's `--check` and `--diff` with a deterministic review gate before any change runs.
+- Polling sub-graphs (port readiness, service health, file existence) where every poll attempt is a discrete step in the trace.
 
-Two rows above required new ansiburr primitives: `gather_facts()` for state expansion and `register=` for full-result capture. The rest is supported by Burr directly. See `src/ansiburr/__init__.py` for the canonical reference.
+## Why not just call ansible-runner directly
+
+A direct `ansible_runner.run(...)` call inside a Burr `@action` works for one or two modules. Beyond that, the same bookkeeping gets repeated each time. ansiburr collects it into a small set of conventions:
+
+- `host()` declares connection metadata once and exposes module shorthands (`.service`, `.copy`, `.shell`, `.template`, etc.) bound to that host.
+- Ambient `_last_failed`, `_last_changed`, `_last_unreachable`, and `_last_msg` state keys make transitions readable without per-action declarations.
+- `gather_facts()` flattens facts into top-level state keys so transitions can branch on `ansible_pkg_mgr` or `ansible_os_family`.
+- `register=` captures the full module result dict when transitions need it.
+- `check_mode=True` and `diff=True` project Ansible's structured diff into a state field for plan-before-apply patterns.
+- `wait_until()` materializes polling loops as observable FSM steps instead of one opaque blocking module call.
+- ControlPersist and pipelining are enabled by default for SSH connection reuse across modules targeting the same host.
 
 ## Install
 
@@ -38,7 +40,7 @@ ansible-galaxy collection install community.general community.crypto community.d
 
 ## Quickstart
 
-An FSM that gathers facts from a remote host and branches on the package manager:
+An FSM that gathers facts from a remote host and dispatches to a distro-appropriate package inspection command:
 
 ```python
 from burr.core import ApplicationBuilder, action, expr
@@ -99,11 +101,23 @@ _, _, final = app.run(halt_after=["summarize"])
 print(final["report"])
 ```
 
-The same FSM works against Debian, RHEL, Fedora, Arch, or any other distro Ansible supports. Transitions branch on the gathered `ansible_pkg_mgr` fact.
+The same FSM works against Debian, RHEL, Fedora, Arch, or any other distro Ansible supports. The branch is taken by the gathered fact, not by hard-coded logic.
+
+## Recorded demos
+
+`fact_driven_inspect`: gather facts on the target, branch on `ansible_pkg_mgr`, run the apt-specific inspection, summarize.
+
+![fact_driven_inspect demo](vhs/fact_driven_inspect.gif)
+
+`plan_then_apply`: three scenarios. A small diff under policy gets approved and applied. An oversized diff is rejected by the review action before any apply runs. A re-run with the default value is idempotent.
+
+![plan_then_apply demo](vhs/plan_then_apply.gif)
+
+The tape scripts that produced these are in `vhs/`. Re-record with `vhs vhs/<name>.tape`.
 
 ## Demo corpus
 
-`examples/` contains eleven FSMs. Most run against a local Docker container set up by `examples/service_remediation/setup.sh`.
+`examples/` contains eleven self-contained FSMs. Most run against a local Docker container set up by `examples/service_remediation/setup.sh`.
 
 | Demo | What it shows | Collections used |
 |---|---|---|
@@ -119,11 +133,9 @@ The same FSM works against Debian, RHEL, Fedora, Arch, or any other distro Ansib
 | `fact_driven_inspect` | `gather_facts()` state expansion; transitions branch on `ansible_pkg_mgr` | `ansible.builtin` |
 | `plan_then_apply` | check+diff plan, deterministic review gate, `wait_until` polling sub-graph, apply with verify | `ansible.builtin` |
 
-Each example is self-contained and runs in seconds.
+Each example runs in seconds. Run an individual demo with `uv run python examples/<name>/fsm.py`.
 
 ## Library reference
-
-Exports from `ansiburr`. The canonical docstring is in `src/ansiburr/__init__.py`.
 
 - `module_action(module, reads, writes, register, host, connection, become, check_mode, diff)`. The core decorator. Wraps a function returning module args into a Burr `@action` that invokes the module via ansible-runner.
 - `host(name, **hostvars)`. Connection profile. Captures Ansible hostvars plus `become` once; exposes `.module(fqcn, ...)` and shorthands (`.service`, `.copy`, `.shell`, `.command`, `.template`, `.file`, `.find`, `.slurp`, `.uri`, `.systemd`).
@@ -136,16 +148,23 @@ Exports from `ansiburr`. The canonical docstring is in `src/ansiburr/__init__.py
 
 Every `@module_action` writes the ambient sentinels: `_last_action`, `_last_failed`, `_last_changed`, `_last_unreachable`, `_last_msg`. Burr's tracker captures the full Ansible module result dict per step, so the trace shows `stdout`, `stderr`, `rc`, `diff`, `changed`, and any module-specific fields alongside the state snapshot.
 
-## Why ansiburr versus a hand-rolled wrapper
+## Reference: Ansible playbook idioms in ansiburr
 
-Embedding `ansible_runner.run(...)` inside a Burr `@action` directly is straightforward. ansiburr exists for the bookkeeping that accumulates as a graph grows past a handful of actions:
+| Ansible playbook idiom | ansiburr / Burr equivalent |
+|---|---|
+| `gather_facts: yes` | `host.gather_facts()` flattens `ansible_facts` into top-level State keys |
+| `vars:` block on a play | `.with_state(**kwargs)` initializer |
+| `set_fact: foo: bar` | pure-Python `@action` doing `state.update(foo="bar")` |
+| `register: result` | `@module_action(register="result")` or `target.shell(register="result")` |
+| `when: cond` | transition predicate `expr("cond")` |
+| `failed_when:` | guard transition on `_last_failed` plus state expressions |
+| `changed_when:` | guard on `_last_changed` plus computed result fields |
+| `block / rescue / always` | guarded transition sub-graph; `rescue:` is an edge gated on `expr("_last_failed")` |
+| `notify:` plus handlers | transition guarded by `expr("_last_changed")` to the handler action |
+| `loop: items` | FSM iteration via state counter and back-edge |
+| `wait_for: ...` | `ansiburr.wait_until(...)` polling sub-graph (each attempt is one Burr step) |
 
-- Connection metadata duplication. `host()` captures it once.
-- Failure, change, and unreachable tracking per action. Ambient sentinels let transitions read `_last_failed` without each user declaring it.
-- Fact gathering as state expansion. Without ansiburr, all hundred or so facts land in one opaque dict and transitions cannot branch on them directly.
-- Plan-before-apply via `check_mode=True` and `diff=True`, with the structured diff projected into a state field the tracker captures.
-- Polling-loop semantics for `wait_for`-style behavior, expressed as observable FSM transitions rather than one opaque blocking step.
-- ControlPersist and pipelining defaults, so multi-module sequences targeting the same host reuse one SSH session.
+Two of these required new ansiburr primitives: `gather_facts()` and `register=`. The rest are supported by Burr directly.
 
 ## Dependencies and licensing
 
@@ -163,11 +182,12 @@ This README is engineering documentation, not legal advice.
 git clone https://github.com/<owner>/ansiburr
 cd ansiburr
 uv sync
+uv run pytest
 uv run ruff check .
 uv run mypy src/ansiburr
 ```
 
-Most examples require a small Docker container. `examples/service_remediation/setup.sh` builds the image and generates a per-clone SSH key; `examples/service_remediation/start.sh` runs the container. Run an individual demo with `uv run python examples/<name>/fsm.py`.
+Most examples require a small Docker container. `examples/service_remediation/setup.sh` builds the image and generates a per-clone SSH key; `examples/service_remediation/start.sh` runs the container.
 
 ansiburr was developed with significant AI assistance (Anthropic's Claude). All changes were reviewed and committed by the project owner.
 
