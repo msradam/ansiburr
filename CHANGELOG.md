@@ -6,6 +6,23 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.3] - 2026-05-21
+
+### Added
+
+- `ansiburr` command-line entry point. `ansiburr run <path>` executes an FSM
+  from either a YAML playbook or a Python module that exposes an `app`
+  attribute (or a `build_application()` callable). `ansiburr graph <path>`
+  prints the FSM structure as mermaid (default), graphviz dot, or plain
+  text. `--halt-after ACTION` (repeatable) overrides the default halt set;
+  unknown halt names produce a clear error instead of an opaque library
+  trace.
+
+### Documented
+
+- README has a CLI section between "From an existing playbook" and "Demo
+  corpus". REFERENCE.md gets a CLI usage block at the top.
+
 ## [0.0.2] - 2026-05-21
 
 Runner hardening and a real playbook-conversion example.
@@ -100,4 +117,5 @@ Initial alpha release.
 
 [0.0.1]: https://github.com/msradam/ansiburr/releases/tag/v0.0.1
 [0.0.2]: https://github.com/msradam/ansiburr/releases/tag/v0.0.2
-[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.2...HEAD
+[0.0.3]: https://github.com/msradam/ansiburr/releases/tag/v0.0.3
+[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.3...HEAD

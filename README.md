@@ -131,7 +131,26 @@ git: rc=0 git version 2.50.1 (Apple Git-155)
 jq:  rc=0  jq-1.7.1-apple
 ```
 
-The converter supports flat tasks with `name`, `when:`, `register:`, `failed_when:`, `ignore_errors:`, `become:`, `gather_facts:`, and play-level `vars:`. Jinja2 `{{ ... }}` references to registered values are rendered using Burr state before each task runs. Unsupported playbook constructs (`block`, `loop`, `notify`, `roles`, multi-play files) raise `UnsupportedPlaybookConstruct` at conversion time with the offending node named in the message, so a partially-converted FSM never starts. From here you can hand-edit the resulting Application — add transitions, swap actions, wire in policy gates — or keep using the playbook as the source of truth and re-convert.
+The converter supports flat tasks with `name`, `when:`, `register:`, `failed_when:`, `ignore_errors:`, `become:`, `gather_facts:`, and play-level `vars:`. Jinja2 `{{ ... }}` references to registered values are rendered using Burr state before each task runs. Unsupported playbook constructs (`block`, `loop`, `notify`, `roles`, multi-play files) raise `UnsupportedPlaybookConstruct` at conversion time with the offending node named in the message, so a partially-converted FSM never starts. From here, the resulting Application can be hand-edited (add transitions, swap actions, wire in policy gates) or the playbook can stay as the source of truth and be re-converted.
+
+## CLI
+
+`pip install ansiburr` ships an `ansiburr` command for running and inspecting FSMs without writing a wrapper script.
+
+```sh
+# Run a playbook directly (no manual conversion).
+ansiburr run playbook.yml
+
+# Run a Python module that exposes ``app`` (or a ``build_application()`` callable).
+ansiburr run examples/localhost_disk_check.py
+
+# Print the FSM structure as mermaid (default), graphviz dot, or plain text.
+ansiburr graph examples/from_playbook/playbook.yml --format text
+ansiburr graph examples/from_playbook/playbook.yml --format mermaid
+ansiburr graph examples/from_playbook/playbook.yml --format dot
+```
+
+`ansiburr run` halts on `done` or `escalate` by default, and accepts `--halt-after ACTION` (repeatable) to override.
 
 ## Demo corpus
 

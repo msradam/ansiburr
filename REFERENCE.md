@@ -1,5 +1,14 @@
 # ansiburr reference
 
+## CLI
+
+```
+ansiburr run    <path> [--halt-after ACTION ...]
+ansiburr graph  <path> [--format {mermaid,dot,text}]
+```
+
+`<path>` is either a `.yml`/`.yaml` playbook (lifted via `from_playbook`) or a `.py` file that exposes either a module-level `app` Application or a `build_application()` callable. `run` halts on `done` or `escalate` by default. `graph` defaults to mermaid output.
+
 ## Library
 
 - `module_action(module, reads, writes, register, host, connection, become, check_mode, diff)`. The core decorator. Wraps a function returning module args into a Burr `@action` that invokes the module via ansible-runner.
