@@ -39,12 +39,35 @@ def test_register_capture_lands_in_state() -> None:
     assert ping.get("ping") == "pong"
 
 
-def test_block_rescue_plus_always_still_raises() -> None:
-    """``block: + rescue:`` (v0.0.10) and ``block: + always:`` (v0.0.11) are
-    each supported alone. Combining all three (block + rescue + always) is
-    not yet."""
-    with pytest.raises(ansiburr.UnsupportedPlaybookConstruct, match=r"rescue.*always"):
-        ansiburr.from_playbook(FIXTURES / "playbook_unsupported_block.yml")
+def test_block_rescue_always_full_combo_rescued() -> None:
+    """block + rescue + always where the block fails and rescue succeeds:
+      - rescue runs (rescued=True)
+      - always runs (always_ran=True)
+      - the rescue clears the latched failure so restore is a no-op
+      - the FSM reaches done, not escalate
+    """
+    app = ansiburr.from_playbook(FIXTURES / "playbook_block_rescue_always.yml")
+    last, _, final = app.run(halt_after=["done", "escalate"])
+    assert last.name == "done"
+    assert final["rescued"] is True
+    assert final["always_ran"] is True
+    assert final["_last_failed"] is False
+
+
+def test_block_rescue_always_full_combo_double_failure() -> None:
+    """block + rescue + always where BOTH the block AND rescue fail:
+      - rescue's failure latches into the flag via save_failure
+      - always still runs (always_ran=True)
+      - restore_failure re-applies _last_failed=True after always
+      - the FSM reaches escalate, not done
+    """
+    app = ansiburr.from_playbook(
+        FIXTURES / "playbook_block_rescue_always_double_fail.yml"
+    )
+    last, _, final = app.run(halt_after=["done", "escalate"])
+    assert last.name == "escalate"
+    assert final["always_ran"] is True
+    assert final["_last_failed"] is True
 
 
 def test_block_plus_always_runs_always_after_block_success() -> None:

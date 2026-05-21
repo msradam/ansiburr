@@ -273,15 +273,50 @@ def _flatten_tasks(
         combined_notify = inherited_notify + task_notify
 
         if "block" in task:
-            if "rescue" in task and "always" in task:
-                raise UnsupportedPlaybookConstruct(
-                    "block: with both rescue: and always: is not yet supported "
-                    f"(task: {task.get('name', '<unnamed>')!r}); "
-                    "rescue: alone (v0.0.10) and always: alone (v0.0.11) work"
-                )
             block_tasks = task["block"]
             if not isinstance(block_tasks, list):
                 raise ValueError(f"block: must be a list, got {type(block_tasks).__name__}")
+            if "rescue" in task and "always" in task:
+                # Pass through the full triple-combo; the main converter
+                # loop wires both the rescue routing and the always
+                # save/restore actions in one coordinated lowering.
+                rescue_tasks = task["rescue"]
+                always_tasks = task["always"]
+                if not isinstance(rescue_tasks, list):
+                    raise ValueError(
+                        f"rescue: must be a list, got {type(rescue_tasks).__name__}"
+                    )
+                if not isinstance(always_tasks, list):
+                    raise ValueError(
+                        f"always: must be a list, got {type(always_tasks).__name__}"
+                    )
+                preserved = {
+                    "block": _flatten_tasks(
+                        block_tasks,
+                        base_dir=base_dir,
+                        inherited_when=combined_when,
+                        inherited_notify=combined_notify,
+                        depth=depth + 1,
+                    ),
+                    "rescue": _flatten_tasks(
+                        rescue_tasks,
+                        base_dir=base_dir,
+                        inherited_when=combined_when,
+                        inherited_notify=combined_notify,
+                        depth=depth + 1,
+                    ),
+                    "always": _flatten_tasks(
+                        always_tasks,
+                        base_dir=base_dir,
+                        inherited_when=combined_when,
+                        inherited_notify=combined_notify,
+                        depth=depth + 1,
+                    ),
+                }
+                if task.get("name"):
+                    preserved["name"] = task["name"]
+                flat.append(preserved)
+                continue
             if "always" in task:
                 # block + always (no rescue). Pass through without inlining;
                 # main converter loop wires the failure-preservation actions
@@ -867,13 +902,12 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
     # Maps the loop-task's py_name -> (init_py_name, advance_py_name, done_state_key).
     loop_back_edges: dict[str, tuple[str, str, str]] = {}
     # Per-task block routing context, populated when a leaf is part of a
-    # block + rescue group. Maps py_name -> (rescue_first, clear_action, is_last)
-    # for block tasks. Rescue tasks and the clear action do not need
-    # overrides because their standard escalate / next-seq behavior is
-    # exactly what Ansible's semantics ask for. The transition builder
-    # consults this dict to emit the block_task -> rescue_first transition
-    # on failure and the block_last -> clear_action transition on success.
+    # block + rescue (or block + always, or block + rescue + always) group.
+    # Maps py_name -> (failure_target, success_skip_target, is_last) for
+    # block tasks. Rescue tasks under the triple combo also need a failure
+    # override; those live in ``rescue_failure_overrides``.
     block_ctxs: dict[str, tuple[str, str, bool]] = {}
+    rescue_failure_overrides: dict[str, str] = {}
 
     for idx, task in enumerate(leaf_tasks):
         raw_name = task.get("name") or f"task_{idx + 1}"
@@ -881,6 +915,123 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
         # ``block:`` with a rescue: or always: clause is lowered here.
         # Pure block (no rescue, no always) is already inlined by
         # ``_flatten_tasks`` and never reaches this branch.
+        if "block" in task and "rescue" in task and "always" in task:
+            block_inner = task["block"]
+            rescue_inner = task["rescue"]
+            always_inner = task["always"]
+            block_leaves = _flatten_tasks(block_inner, base_dir=base_dir)
+            rescue_leaves = _flatten_tasks(rescue_inner, base_dir=base_dir)
+            always_leaves = _flatten_tasks(always_inner, base_dir=base_dir)
+            if not block_leaves:
+                raise ValueError("block: must contain at least one task")
+            if not rescue_leaves:
+                raise ValueError("rescue: must contain at least one task")
+            if not always_leaves:
+                raise ValueError("always: must contain at least one task")
+            if any(
+                "block" in leaf
+                for leaf in block_leaves + rescue_leaves + always_leaves
+            ):
+                raise UnsupportedPlaybookConstruct(
+                    "nested block within block+rescue+always is not yet supported"
+                )
+
+            block_py_names_3 = []
+            for b_idx, btask in enumerate(block_leaves):
+                b_raw = btask.get("name") or f"block_task_{b_idx + 1}"
+                block_py_names_3.append(_unique(_slugify(b_raw)))
+            rescue_py_names_3 = []
+            for r_idx, rtask in enumerate(rescue_leaves):
+                r_raw = rtask.get("name") or f"rescue_task_{r_idx + 1}"
+                rescue_py_names_3.append(_unique(_slugify(r_raw)))
+            always_py_names_3 = []
+            for a_idx, atask in enumerate(always_leaves):
+                a_raw = atask.get("name") or f"always_task_{a_idx + 1}"
+                always_py_names_3.append(_unique(_slugify(a_raw)))
+            clear_py_name_3 = _unique("_block_clear_failure")
+            save_py_name_3 = _unique("_block_save_failure")
+            restore_py_name_3 = _unique("_block_restore_failure")
+            flag_key_3 = f"_block_failure_remembered_{len(block_ctxs)}"
+            rescue_first_3 = rescue_py_names_3[0]
+
+            def _record_inner_triple(py: str, t: dict[str, Any]) -> None:
+                if any(k in t for k in ("loop", "with_items", "notify", "changed_when")):
+                    raise UnsupportedPlaybookConstruct(
+                        "loop:/with_items:/notify:/changed_when: inside block: "
+                        "or rescue: or always: are not yet supported; "
+                        f"task: {t.get('name', '<unnamed>')!r}"
+                    )
+                module, args = _module_from_task(t)
+                register = t.get("register")
+                become = bool(t.get("become", play_become))
+                when = t.get("when")
+                fw = t.get("failed_when")
+                if module in _SET_FACT_MODULES:
+                    _record(
+                        py_name=py,
+                        when_clause=_when_to_expr_string(when) if when is not None else None,
+                        failed_when_clause=None,
+                        ignore_errors=True,
+                        register=None,
+                        meta=("set_fact", args),
+                    )
+                    return
+                _record(
+                    py_name=py,
+                    when_clause=_when_to_expr_string(when) if when is not None else None,
+                    failed_when_clause=_when_to_expr_string(fw) if fw is not None else None,
+                    ignore_errors=bool(t.get("ignore_errors", False)),
+                    register=register,
+                    meta=("module", module, args, register, become),
+                )
+
+            # Block tasks: failure -> rescue_first. block_last success ->
+            # save_failure (skipping rescue + clear because the block didn't
+            # fail). The standard chain block_last -> rescue_first via next-seq
+            # would only fire on the failure path, so the success override
+            # is needed.
+            for b_idx, (py, btask) in enumerate(
+                zip(block_py_names_3, block_leaves, strict=True)
+            ):
+                is_last_block = b_idx == len(block_py_names_3) - 1
+                block_ctxs[py] = (rescue_first_3, save_py_name_3, is_last_block)
+                _record_inner_triple(py, btask)
+            for py, rtask in zip(rescue_py_names_3, rescue_leaves, strict=True):
+                # rescue tasks: failure -> save_failure (so the rescue
+                # failure is latched and propagates through always).
+                # success -> next-seq, which lands on the next rescue
+                # task or, for rescue_last, on clear_action (the default
+                # next-seq is already correct).
+                rescue_failure_overrides[py] = save_py_name_3
+                _record_inner_triple(py, rtask)
+            _record(
+                py_name=clear_py_name_3,
+                when_clause=None,
+                failed_when_clause=None,
+                ignore_errors=True,
+                register=None,
+                meta=("clear_failure",),
+            )
+            _record(
+                py_name=save_py_name_3,
+                when_clause=None,
+                failed_when_clause=None,
+                ignore_errors=True,
+                register=None,
+                meta=("block_save_failure", flag_key_3),
+            )
+            for py, atask in zip(always_py_names_3, always_leaves, strict=True):
+                _record_inner_triple(py, atask)
+            _record(
+                py_name=restore_py_name_3,
+                when_clause=None,
+                failed_when_clause=None,
+                ignore_errors=False,
+                register=None,
+                meta=("block_restore_failure", flag_key_3),
+            )
+            continue
+
         if "block" in task and "always" in task:
             block_inner = task["block"]
             always_inner = task["always"]
@@ -1374,11 +1525,17 @@ def from_playbook(path: str | Path, *, project: str | None = None) -> Applicatio
         # Failure routing for the current task: if the failed_when expression
         # is satisfied (or _last_failed if none was given) and ignore_errors
         # was not set, the FSM routes to the escalate terminal, except for
-        # block tasks under a rescue clause, where it routes to the rescue
-        # chain's entry instead.
+        # block tasks under a rescue clause (routes to rescue_first) or
+        # rescue tasks under the triple combo (routes to save_failure so
+        # the failure is preserved through the always chain).
         if not ignore_errors_flags[i]:
             failure_predicate = failed_when_clauses[i] or "_last_failed"
-            failure_target = rescue_first_target if is_block_task else "escalate"
+            if is_block_task:
+                failure_target = rescue_first_target
+            elif current in rescue_failure_overrides:
+                failure_target = rescue_failure_overrides[current]
+            else:
+                failure_target = "escalate"
             transitions.append((current, failure_target, expr(failure_predicate)))
 
         # ``when:`` skip behavior with chained skip. For each k>=1, if the

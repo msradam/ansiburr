@@ -6,6 +6,37 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.12] - 2026-05-21
+
+Closes out the block/rescue/always trilogy. Every standard Ansible
+error-handling shape now lowers cleanly into the FSM.
+
+### Added
+
+- Converter: ``block: + rescue: + always:`` (the full three-clause
+  shape) lowers into a coordinated sub-graph combining the v0.0.10 and
+  v0.0.11 lowerings. Block failure routes to rescue (as in v0.0.10);
+  rescue failure routes to the failure-latch action so the failure
+  survives the subsequent always chain (as in v0.0.11); rescue success
+  routes through the clear-failure action then through the latch
+  (no-op when nothing is latched) then to always; always runs
+  unconditionally; restore-failure after always re-applies a latched
+  rescue-failure so it escalates after the always chain finishes.
+- Two new tests covering the happy path (block fails, rescue succeeds,
+  always runs, FSM reaches done) and the double-failure path (block
+  fails, rescue fails, always still runs, FSM reaches escalate with
+  ``_last_failed`` restored).
+
+### Still rejected
+
+- Nested block within block+rescue, block+always, or the triple combo.
+- ``loop:`` / ``with_items:``, ``notify:``, ``changed_when:`` inside
+  block, rescue, or always. (These features all work outside.)
+
+The "still rejected" list of Ansible idioms is now down to advanced
+constructs and edge cases. Every popular community-role pattern from
+the v0.0.4 research pass is supported.
+
 ## [0.0.11] - 2026-05-21
 
 ### Added
@@ -372,4 +403,5 @@ Initial alpha release.
 [0.0.9]: https://github.com/msradam/ansiburr/releases/tag/v0.0.9
 [0.0.10]: https://github.com/msradam/ansiburr/releases/tag/v0.0.10
 [0.0.11]: https://github.com/msradam/ansiburr/releases/tag/v0.0.11
-[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.10...HEAD
+[0.0.12]: https://github.com/msradam/ansiburr/releases/tag/v0.0.12
+[Unreleased]: https://github.com/msradam/ansiburr/compare/v0.0.12...HEAD
