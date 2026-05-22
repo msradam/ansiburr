@@ -37,6 +37,15 @@ ansiburr addresses these structurally rather than behaviorally. The FSM is the s
 
 For workflows without a model in the loop, the same primitives still buy observability and composability. Plain IT automation gets per-step traces, persistence, and free composition between Ansible modules and Python `@action` functions through Burr's standard tooling.
 
+### Verified locally
+
+The two structural claims above are checked across 18 runs of `examples/mast_sre_agent` (two LLMs, three fault scenarios, three trials each). Latest results in [BENCHMARK.md](./BENCHMARK.md):
+
+- All 6 trials that reached `done` arrived via an `external_verify` action returning HTTP 200.
+- A weak LLM (`ibm/granite4:350m`, 700 MB) failed to classify any scenario but executed zero wrong-remediation chains. A capable LLM (`ibm/granite4:micro`, 2 GB) resolved the answerable scenarios and bailed on the irrelevant-log scenario.
+
+This is local invariant-checking, not the [ITBench](https://github.com/itbench-hub/ITBench) leaderboard. ITBench integration is on the roadmap; it needs a K8s cluster and a custom agent adapter.
+
 ## Install
 
 ```sh
